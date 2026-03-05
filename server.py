@@ -69,6 +69,8 @@ CALENDAR_URL = (
 )
 TEACHER_PROFILE_URL = f"{BASE_URL}/mob_func_geral.perfil"
 TEACHER_SEARCH_URL = f"{BASE_URL}/mob_func_geral.pesquisa"
+PARKING_URL = f"{BASE_URL}/instalacs_geral.ocupacao_parques"
+CANTEEN_URL = f"{BASE_URL}/mob_eme_geral.cantinas"
 
 HEADERS = {
     "User-Agent": (
@@ -261,7 +263,86 @@ async def search_teachers(nome: str) -> str:
     except Exception as exc:
         return f"Erro ao pesquisar docentes: {exc}"
 
+@mcp.tool()
+@cached(ttl_seconds=60)
+async def get_parking_status() -> str:
+    """
+    Obtém o estado dos parques de estacionamento da FEUP.
+    """
 
+    try:
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(PARKING_URL, headers=HEADERS)
+            response.raise_for_status()
+
+        data = response.json()
+
+        info = data["itdc"][0]["resposta"]
+
+        p1_livres = info["p1livres"]
+        p1_ocup = info["p1ocupados"]
+
+        p3_livres = info["p3livres"]
+        p3_ocup = info["p3ocupados"]
+
+        p4_livres = info["p4livres"]
+        p4_ocup = info["p4ocupados"]
+
+        return (
+            "Estado dos parques da FEUP:\n\n"
+            f"P1 → {p1_livres} livres / {p1_ocup} ocupados\n"
+            f"P3 → {p3_livres} livres / {p3_ocup} ocupados\n"
+            f"P4 → {p4_livres} livres / {p4_ocup} ocupados"
+        )
+
+    except Exception as exc:
+        return f"Erro ao obter estacionamento: {exc}"
+
+@mcp.tool()
+@cached(ttl_seconds=3600)
+async def get_canteen_menu() -> str:
+    """
+    Obtém a ementa da cantina FEUP.
+    """
+
+    try:
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(CANTEEN_URL, headers=HEADERS)
+            response.raise_for_status()
+
+        data = response.json()
+
+        menu_text = "Ementa FEUP:\n\n"
+
+        for place in data:
+
+            name = place["descricao"]
+
+            if not place["ementas"]:
+                continue
+
+            menu_text += f"{name}\n"
+
+            for day in place["ementas"]:
+                date = day["data"]
+
+                menu_text += f"{date}\n"
+
+                for dish in day["pratos"]:
+                    tipo = dish["tipo_descr"]
+                    desc = dish["descricao"]
+
+                    menu_text += f" - {tipo}: {desc}\n"
+
+                menu_text += "\n"
+
+        return menu_text
+
+    except Exception as exc:
+        return f"Erro ao obter ementa: {exc}"
+    
 @mcp.tool()
 async def get_teacher_profile(codigo: int) -> str:
     """
@@ -312,6 +393,8 @@ async def get_teacher_profile(codigo: int) -> str:
         return f"Erro HTTP {exc.response.status_code}: docente com código {codigo} não encontrado."
     except Exception as exc:
         return f"Erro ao obter perfil do docente: {exc}"
+    
+    
 
 
 # ---------------------------------------------------------------------------

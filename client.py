@@ -80,9 +80,17 @@ async def ask(question: str, verbose: bool = True) -> str:
             # Palavras-chave para calendário
             calendar_keywords = ["calendário", "semestre", "exame", "férias", "aulas", "feriado", "época", "inscrições"]
             is_calendar_question = any(kw in question_lower for kw in calendar_keywords)
+
+            # Palavras-chave para cantina
+            canteen_keywords = ["cantina", "menu", "ementa", "almoço", "jantar"]
+            is_canteen_question = any(kw in question_lower for kw in canteen_keywords)
+
+            # Palavras-chave para estacionamento
+            parking_keywords = ["parque", "estacionamento", "parking", "lugares"]
+            is_parking_question = any(kw in question_lower for kw in parking_keywords)
             
             # Se não detectar nenhum tipo específico, assume calendário
-            if not is_teacher_question and not is_calendar_question:
+            if not is_teacher_question and not is_calendar_question and not is_parking_question and not is_canteen_question:
                 is_calendar_question = True
 
             # Obter dados de docentes se necessário
@@ -108,6 +116,33 @@ async def ask(question: str, verbose: bool = True) -> str:
                         profile_data = profile_result.content[0].text if profile_result.content else ""
                         context_parts.append(f"\nPerfil do docente {i+1}:\n{profile_data}")
                 
+                if verbose:
+                    print("OK")
+
+
+            #devolver o menu da cantina
+            if is_canteen_question:
+                if verbose:
+                    print("  [MCP] A obter menu da cantina...", end=" ", flush=True)
+
+                result = await session.call_tool("get_canteen_menu", arguments={})
+                data = result.content[0].text if result.content else ""
+
+                context_parts.append(f"\nMenu das cantinas:\n{data}")
+
+                if verbose:
+                    print("OK")
+
+            # Obter o status do estacionamento
+            if is_parking_question:
+                if verbose:
+                    print("  [MCP] A obter estado dos parques...", end=" ", flush=True)
+
+                result = await session.call_tool("get_parking_status", arguments={})
+                data = result.content[0].text if result.content else ""
+
+                context_parts.append(f"\nEstado dos parques:\n{data}")
+
                 if verbose:
                     print("OK")
 
