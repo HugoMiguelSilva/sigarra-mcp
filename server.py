@@ -1,25 +1,75 @@
 #!/usr/bin/env python3
 """
-MCP Server para consulta do calendário escolar da FEUP no SIGARRA.
+MCP Server para consulta de informações da FEUP no SIGARRA.
 
 Ferramentas disponíveis:
-  - get_academic_calendar   : obtém o conteúdo completo do calendário
+  - get_academic_calendar   : calendário escolar completo
   - search_calendar_events  : filtra eventos por palavra-chave
-  - get_current_date        : devolve a data de hoje (contexto temporal)
+  - get_current_date        : data de hoje (contexto temporal)
+  - search_teachers         : pesquisa docentes por nome
+  - get_teacher_profile     : perfil de um docente (nome, email, gabinete)
 """
 
 import httpx
+import time
 from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime
+from functools import wraps
+from typing import Any, Callable
+
+# ---------------------------------------------------------------------------
+# Sistema de Cache com TTL
+# ---------------------------------------------------------------------------
+
+_cache: dict[str, tuple[Any, float]] = {}
+
+
+def cached(ttl_seconds: int = 300):
+    """
+    Decorator para caching assíncrono com TTL.
+    
+    Args:
+        ttl_seconds: Tempo de vida do cache em segundos.
+                     Padrão: 300s (5 min).
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Criar chave única baseada na função e argumentos
+            cache_key = f"{func.__name__}:{args}:{sorted(kwargs.items())}"
+            
+            # Verificar cache
+            if cache_key in _cache:
+                value, timestamp = _cache[cache_key]
+                if time.time() - timestamp < ttl_seconds:
+                    return value
+            
+            # Executar função e guardar em cache
+            result = await func(*args, **kwargs)
+            _cache[cache_key] = (result, time.time())
+            return result
+        return wrapper
+    return decorator
+
+
+def clear_cache():
+    """Limpa todo o cache."""
+    _cache.clear()
+
 
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
+BASE_URL = "https://sigarra.up.pt/feup/pt"
+
 CALENDAR_URL = (
-    "https://sigarra.up.pt/feup/pt/web_base.gera_pagina"
+    f"{BASE_URL}/web_base.gera_pagina"
     "?p_pagina=calend%c3%a1rio%20escolar"
 )
+TEACHER_PROFILE_URL = f"{BASE_URL}/mob_func_geral.perfil"
+TEACHER_SEARCH_URL = f"{BASE_URL}/mob_func_geral.pesquisa"
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -30,15 +80,34 @@ HEADERS = {
 }
 MAX_TEXT_CHARS = 10_000
 
-mcp = FastMCP("SIGARRA-FEUP-Calendario")
+mcp = FastMCP("SIGARRA-FEUP")
 
 
 # ---------------------------------------------------------------------------
 # Auxiliares
 # ---------------------------------------------------------------------------
 
+@cached(ttl_seconds=3600)  # Cache de 1 hora para dados de docentes
+async def _fetch_json(url: str, params: dict = None) -> dict:
+    """
+    Faz um pedido GET a um endpoint JSON do SIGARRA (com cache de 1h).
+    
+    Args:
+        url: URL base do endpoint
+        params: Parâmetros query string (ex: {"pv_codigo": 547486})
+    
+    Returns:
+        Dicionário com a resposta JSON
+    """
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        response = await client.get(url, headers=HEADERS, params=params)
+        response.raise_for_status()
+        return response.json()
+
+
+@cached(ttl_seconds=1800)  # Cache de 30 minutos para o calendário
 async def _fetch_and_parse() -> str:
-    """Descarrega o HTML do SIGARRA e devolve texto limpo."""
+    """Descarrega o HTML do SIGARRA e devolve texto limpo (com cache de 30 min)."""
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         response = await client.get(CALENDAR_URL, headers=HEADERS)
         response.raise_for_status()
@@ -152,6 +221,97 @@ async def get_current_date() -> str:
         f"{dias_pt[now.weekday()]}, {now.day} de {meses_pt[now.month]} "
         f"de {now.year} ({now.strftime('%H:%M')})"
     )
+
+
+@mcp.tool()
+async def search_teachers(nome: str) -> str:
+    """
+    Pesquisa docentes da FEUP por nome.
+
+    Args:
+        nome: Nome ou parte do nome do docente a pesquisar (ex: "Bruno Lima").
+
+    Devolve uma lista de docentes encontrados com nome, sigla e código.
+    Use o código para obter mais detalhes com get_teacher_profile().
+    """
+    if not nome or not nome.strip():
+        return "Por favor, indique um nome para pesquisar."
+    
+    try:
+        data = await _fetch_json(TEACHER_SEARCH_URL, {"pv_nome": nome.strip()})
+        
+        resultados = data.get('resultados', [])
+        total = data.get('total', 0)
+        
+        if not resultados:
+            return f"Nenhum docente encontrado com o nome '{nome}'."
+        
+        lines = [f"Encontrados {total} docente(s):"]
+        for r in resultados[:10]:  # Limitar a 10 resultados
+            lines.append(f"- {r.get('nome')} ({r.get('sigla')}) — código: {r.get('codigo')}")
+        
+        if total > 10:
+            lines.append(f"... e mais {total - 10} resultados. Refine a pesquisa.")
+        
+        lines.append("\nUse get_teacher_profile(codigo) para ver o perfil completo.")
+        return "\n".join(lines)
+        
+    except httpx.HTTPStatusError as exc:
+        return f"Erro HTTP {exc.response.status_code} ao pesquisar docentes."
+    except Exception as exc:
+        return f"Erro ao pesquisar docentes: {exc}"
+
+
+@mcp.tool()
+async def get_teacher_profile(codigo: int) -> str:
+    """
+    Obtém o perfil de um docente da FEUP pelo seu código.
+
+    Args:
+        codigo: Código numérico do docente no SIGARRA (ex: 547486).
+                Pode ser encontrado no URL do perfil do docente.
+
+    Devolve informação como nome, email, gabinete, extensão VoIP,
+    e apresentação/biografia do docente.
+    """
+    try:
+        data = await _fetch_json(TEACHER_PROFILE_URL, {"pv_codigo": codigo})
+        
+        # Formatar resposta de forma legível
+        lines = [
+            f"Nome: {data.get('nome', 'N/A')}",
+            f"Sigla: {data.get('sigla', 'N/A')}",
+            f"Email: {data.get('email', 'N/A')}",
+        ]
+        
+        # Gabinete(s)
+        salas = data.get('salas', [])
+        if salas:
+            gabinetes = ", ".join(s.get('sigla', '') for s in salas)
+            lines.append(f"Gabinete: {gabinetes}")
+        
+        # Extensão telefónica
+        if data.get('voip_ext'):
+            lines.append(f"Extensão VoIP: {data.get('voip_ext')}")
+        
+        # Apresentação (remover HTML básico)
+        apresentacao = data.get('apresentacao', '')
+        if apresentacao:
+            # Limpar tags HTML simples
+            import re
+            apresentacao = re.sub(r'<br\s*/?>', '\n', apresentacao)
+            apresentacao = re.sub(r'<[^>]+>', '', apresentacao)
+            apresentacao = apresentacao.strip()
+            if len(apresentacao) > 500:
+                apresentacao = apresentacao[:500] + "..."
+            lines.append(f"\nApresentação:\n{apresentacao}")
+        
+        return "\n".join(lines)
+        
+    except httpx.HTTPStatusError as exc:
+        return f"Erro HTTP {exc.response.status_code}: docente com código {codigo} não encontrado."
+    except Exception as exc:
+        return f"Erro ao obter perfil do docente: {exc}"
 
 
 # ---------------------------------------------------------------------------

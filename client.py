@@ -65,30 +65,70 @@ async def ask(question: str, verbose: bool = True) -> str:
                 names = [tool.name for tool in tools_result.tools]
                 print(f"  [MCP] Ferramentas: {names}")
 
-            # Chamar ferramentas MCP para obter contexto
-            if verbose:
-                print("  [MCP] A obter calendário...", end=" ", flush=True)
-            
-            calendar_result = await session.call_tool("get_academic_calendar", arguments={})
-            calendar_data = calendar_result.content[0].text if calendar_result.content else ""
-            
+            # Obter data atual (sempre útil)
             date_result = await session.call_tool("get_current_date", arguments={})
             current_date = date_result.content[0].text if date_result.content else ""
+
+            # Detectar tipo de pergunta e chamar tools apropriadas
+            question_lower = question.lower()
+            context_parts = [f"Data de hoje: {current_date}"]
             
-            if verbose:
-                print("OK")
+            # Palavras-chave para docentes
+            teacher_keywords = ["professor", "docente", "email", "gabinete", "contacto"]
+            is_teacher_question = any(kw in question_lower for kw in teacher_keywords)
+            
+            # Palavras-chave para calendário
+            calendar_keywords = ["calendário", "semestre", "exame", "férias", "aulas", "feriado", "época", "inscrições"]
+            is_calendar_question = any(kw in question_lower for kw in calendar_keywords)
+            
+            # Se não detectar nenhum tipo específico, assume calendário
+            if not is_teacher_question and not is_calendar_question:
+                is_calendar_question = True
+
+            # Obter dados de docentes se necessário
+            if is_teacher_question:
+                if verbose:
+                    print("  [MCP] Pesquisando docentes...", end=" ", flush=True)
+                
+                # Extrair possível nome do professor da pergunta
+                # Procurar texto após "professor" ou "docente"
+                import re
+                name_match = re.search(r'(?:professor|docente|prof\.?)\s+([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)', question, re.IGNORECASE)
+                
+                if name_match:
+                    teacher_name = name_match.group(1)
+                    search_result = await session.call_tool("search_teachers", arguments={"nome": teacher_name})
+                    search_data = search_result.content[0].text if search_result.content else ""
+                    context_parts.append(f"\nResultados da pesquisa de docentes:\n{search_data}")
+                    
+                    # Obter perfis de todos os docentes encontrados (até 3)
+                    code_matches = re.findall(r'código:\s*(\d+)', search_data)
+                    for i, codigo in enumerate(code_matches[:3]):  # Máximo 3 perfis
+                        profile_result = await session.call_tool("get_teacher_profile", arguments={"codigo": int(codigo)})
+                        profile_data = profile_result.content[0].text if profile_result.content else ""
+                        context_parts.append(f"\nPerfil do docente {i+1}:\n{profile_data}")
+                
+                if verbose:
+                    print("OK")
+
+            # Obter calendário se necessário
+            if is_calendar_question:
+                if verbose:
+                    print("  [MCP] A obter calendário...", end=" ", flush=True)
+                
+                calendar_result = await session.call_tool("get_academic_calendar", arguments={})
+                calendar_data = calendar_result.content[0].text if calendar_result.content else ""
+                context_parts.append(f"\nDados do calendário escolar da FEUP:\n---\n{calendar_data[:8000]}\n---")
+                
+                if verbose:
+                    print("OK")
 
     # Construir mensagem com contexto do SIGARRA (via MCP)
-    enriched_message = f"""Data de hoje: {current_date}
-
-Dados do calendário escolar da FEUP (obtidos via MCP do SIGARRA):
----
-{calendar_data[:8000]}
----
+    enriched_message = f"""{chr(10).join(context_parts)}
 
 Pergunta do utilizador: {question}
 
-Responde com base nos dados do calendário acima. Se a informação não estiver disponível, indica isso claramente."""
+Responde com base nos dados acima. Se a informação não estiver disponível, indica isso claramente."""
 
     # Enviar para a API da universidade
     headers = {
