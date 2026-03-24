@@ -40,6 +40,15 @@ API_KEY = os.getenv("API_KEY", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 SERVER_SCRIPT = Path(__file__).parent / "server.py"
 
+# ---------------------------------------------------------------------------
+# Contexto de Conversa (para follow-ups)
+# ---------------------------------------------------------------------------
+# Guarda o contexto da última pergunta para reutilização em follow-ups
+_conversation_context = {
+    "type": None,  # tipo: "grades", "enrollments", "schedule", "exams", "profile"
+    "data": None,  # dados brutos da última resposta
+}
+
 
 # ---------------------------------------------------------------------------
 # Lógica principal
@@ -106,6 +115,21 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
     enrollments_keywords = ["minhas inscrições", "inscrições", "inscritos em", "que ucs", "uc inscritas", "disciplinas inscritas", "ects"]
     is_enrollments_question = any(kw in question_lower for kw in enrollments_keywords)
     
+    # Detectar follow-ups (perguntas sobre dados já consultados)
+    follow_up_keywords = [
+        "qual delas", "qual é a", "qual é o", "quantas", "quais",
+        "mostre", "mostra", "qual é mais", "qual tem",
+        "a maior", "a menor", "a melhor", "a pior"
+    ]
+    is_follow_up = any(kw in question_lower for kw in follow_up_keywords) and _conversation_context["type"]
+    
+    # Se for follow-up, reutilizar contexto anterior
+    if is_follow_up and _conversation_context["data"]:
+        if verbose:
+            print(f"  [MCP] Follow-up detectado sobre {_conversation_context['type']}...")
+        context_parts.append(f"\n--- Contexto da pergunta anterior ({_conversation_context['type']}) ---")
+        context_parts.append(_conversation_context["data"])
+    
     # Perguntas genéricas de exames (calendário)
     general_exam_keywords = ["exame", "exames", "época de exames"]
     is_general_exam = any(kw in question_lower for kw in general_exam_keywords) and not is_exam_question
@@ -120,6 +144,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
             result = await session.call_tool("get_my_schedule", arguments={})
             data = result.content[0].text if result.content else ""
             context_parts.append(f"\nHorário do estudante:\n{data}")
+            _conversation_context = {"type": "schedule", "data": data}
             if verbose:
                 print("OK")
         else:
@@ -133,6 +158,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
             result = await session.call_tool("get_my_exams", arguments={})
             data = result.content[0].text if result.content else ""
             context_parts.append(f"\nExames inscritos:\n{data}")
+            _conversation_context = {"type": "exams", "data": data}
             if verbose:
                 print("OK")
         else:
@@ -146,6 +172,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
             result = await session.call_tool("get_my_profile", arguments={})
             data = result.content[0].text if result.content else ""
             context_parts.append(f"\nPerfil do estudante:\n{data}")
+            _conversation_context = {"type": "profile", "data": data}
             if verbose:
                 print("OK")
         else:
@@ -159,6 +186,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
             result = await session.call_tool("get_my_grades", arguments={})
             data = result.content[0].text if result.content else ""
             context_parts.append(f"\nNotas do estudante:\n{data}")
+            _conversation_context = {"type": "grades", "data": data}
             if verbose:
                 print("OK")
         else:
@@ -172,6 +200,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
             result = await session.call_tool("get_my_enrollments", arguments={})
             data = result.content[0].text if result.content else ""
             context_parts.append(f"\nInscrições do estudante:\n{data}")
+            _conversation_context = {"type": "enrollments", "data": data}
             if verbose:
                 print("OK")
         else:
