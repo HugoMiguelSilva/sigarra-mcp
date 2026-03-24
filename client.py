@@ -67,6 +67,8 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
 
     Retorna a resposta final do modelo.
     """
+    global _conversation_context
+    
     # Listar ferramentas MCP disponíveis
     tools_result = await session.list_tools()
     if verbose:
@@ -123,12 +125,16 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
     ]
     is_follow_up = any(kw in question_lower for kw in follow_up_keywords) and _conversation_context["type"]
     
-    # Se for follow-up, reutilizar contexto anterior
+    # Se for follow-up, reutilizar contexto anterior (truncado para evitar limite de tokens)
     if is_follow_up and _conversation_context["data"]:
         if verbose:
             print(f"  [MCP] Follow-up detectado sobre {_conversation_context['type']}...")
+        # Truncar contexto para evitar limite de tokens da API
+        context_data = _conversation_context["data"]
+        if len(context_data) > 2000:
+            context_data = context_data[:2000] + "\n[... mais dados truncados ...]"
         context_parts.append(f"\n--- Contexto da pergunta anterior ({_conversation_context['type']}) ---")
-        context_parts.append(_conversation_context["data"])
+        context_parts.append(context_data)
     
     # Perguntas genéricas de exames (calendário)
     general_exam_keywords = ["exame", "exames", "época de exames"]
