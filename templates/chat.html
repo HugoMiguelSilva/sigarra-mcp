@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chat</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- Top bar with user icon -->
+<div class="top-bar">
+  <span id="username-display"></span>
+  <img src="{{ url_for('static', filename='user-icon.png') }}" class="user-icon" title="Profile">
+</div>
+
+<!-- Chat messages -->
+<div class="chat-container" id="chat"></div>
+
+<!-- Input box fixed at bottom -->
+<div class="input-container">
+  <input type="text" id="input" placeholder="Send a message...">
+  <button onclick="sendMessage()">Send</button>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  // Get username from localStorage
+  const username = localStorage.getItem('username');
+
+  // Redirect to login if no username
+  if(!username) {
+    alert("You must login first!");
+    window.location.href = '/';
+    return;
+  }
+
+  document.getElementById('username-display').innerText = username;
+
+  const chat = document.getElementById("chat");
+  const input = document.getElementById("input");
+
+  function addMessage(text, sender) {
+    const msg = document.createElement("div");
+    msg.classList.add("message", sender);
+    msg.innerText = text;
+    chat.appendChild(msg);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function sendMessage() {
+    const text = input.value.trim();
+    if(!text) return;
+
+    addMessage(text, "user");
+    input.value = "";
+
+    // Fake assistant reply
+    setTimeout(() => addMessage("This is a demo reply.", "assistant"), 500);
+  }
+
+  input.addEventListener("keypress", function(e) {
+    if(e.key === "Enter") sendMessage();
+  });
+});
+</script>
+
+</body>
+</html>

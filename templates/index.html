@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <div class="login-container">
+    <h1>Welcome Back</h1>
+    <input type="text" id="username" placeholder="Username" />
+    <input type="password" id="password" placeholder="Password" />
+    <button onclick="login()">Login</button>
+    <div class="footer">
+      Don't have an account? <a href="#">Sign Up</a>
+    </div>
+  </div>
+
+<script>
+function login() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value.trim();
+
+  if(!username || !password) {
+    alert("Please enter both username and password");
+    return;
+  }
+
+  // Store username (demo purpose)
+  localStorage.setItem('username', username);
+
+  // Redirect to chat page
+  window.location.href = '/chat';
+}
+</script>
+
+</body>
+</html>
