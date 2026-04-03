@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 Cliente MCP para perguntas em linguagem natural sobre o SIGARRA.
-Usa MCP para obter dados do SIGARRA e a API da universidade (iaedu.pt) para gerar respostas.
-
-Uso:
-    # Modo interactivo (pede login primeiro):
-    python client.py
-    
-    # Pergunta directa (sem login):
-    python client.py "Quando terminam as aulas do 1.º semestre?"
 """
 
 import asyncio
@@ -17,9 +9,9 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime
 from getpass import getpass
 from pathlib import Path
+from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
 import httpx
 from dotenv import load_dotenv
@@ -29,444 +21,323 @@ from mcp.client.stdio import stdio_client
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
-
 load_dotenv()
 
-API_ENDPOINT = os.getenv(
-    "API_ENDPOINT",
-    "https://api.iaedu.pt/agent-chat/api/v1/agent/cmamvd3n40000c801qeacoad2/stream"
-)
+API_ENDPOINT = os.getenv("API_ENDPOINT", "https://api.iaedu.pt/agent-chat/api/v1/agent/cmamvd3n40000c801qeacoad2/stream")
 API_KEY = os.getenv("API_KEY", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 SERVER_SCRIPT = Path(__file__).parent / "server.py"
 
-# ---------------------------------------------------------------------------
-# Contexto de Conversa (para follow-ups)
-# ---------------------------------------------------------------------------
-# Guarda o contexto da última pergunta para reutilização em follow-ups
-_conversation_context = {
-    "type": None,  # tipo: "grades", "enrollments", "schedule", "exams", "profile"
-    "data": None,  # dados brutos da última resposta
+DEFAULT_SOURCE_URL = "https://sigarra.up.pt/feup/pt/web_page.inicial"
+SOURCE_URLS = {
+    "teacher": "https://sigarra.up.pt/feup/pt/mob_func_geral.pesquisa",
+    "course": "https://sigarra.up.pt/feup/pt/ucurr_geral.pesquisa_ocorr_ucs_list",
+    "calendar": "https://sigarra.up.pt/feup/pt/web_base.gera_pagina?p_pagina=calend%c3%a1rio%20escolar",
+    "canteen": "https://sigarra.up.pt/feup/pt/mob_eme_geral.cantinas",
+    "parking": "https://sigarra.up.pt/feup/pt/instalacs_geral.ocupacao_parques",
+    "schedule": "https://sigarra.up.pt/feup/pt/mob_hor_geral.estudante",
+    "exams": "https://sigarra.up.pt/feup/pt/mob_fest_geral.exames",
+    "profile": "https://sigarra.up.pt/feup/pt/mob_fest_geral.percurso_academico",
+    "grades": "https://sigarra.up.pt/feup/pt/mob_fest_geral.percurso_academico",
+    "enrollments": "https://sigarra.up.pt/feup/pt/mob_fest_geral.ucurr_inscricoes_corrente",
 }
+COURSE_INFO_VIEW_URL = "https://sigarra.up.pt/feup/pt/ucurr_geral.ficha_uc_view"
+SOURCE_URLS_BY_CONTEXT = {
+    "horário": SOURCE_URLS["schedule"],
+    "exames": SOURCE_URLS["exams"],
+    "perfil": SOURCE_URLS["profile"],
+    "notas": SOURCE_URLS["grades"],
+    "inscrições": SOURCE_URLS["enrollments"],
+    "uc": SOURCE_URLS["course"],
+}
+AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments"}
+AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições"}
+
+_conversation_context = {"type": None, "data": None}
+
+
+def _append_query_params(url: str, params: dict[str, str]) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(params)
+    new_query = urlencode(query)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+async def _get_student_code(session: ClientSession, is_authenticated: bool) -> str | None:
+    if not is_authenticated:
+        return None
+    try:
+        result = await session.call_tool("get_session_status", arguments={})
+        status = result.content[0].text if result.content else ""
+        match = re.search(r"\((\d+)\)", status)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def _choose_source_url(intents: dict, context_type: str | None, student_code: str | None) -> str:
+    """Escolhe uma única URL de confirmação com prioridade por intenção."""
+    priority = ["teacher", "course", "schedule", "exams", "profile", "grades", "enrollments", "canteen", "parking", "calendar"]
+    chosen_intent = None
+
+    for key in priority:
+        if intents.get(key):
+            chosen_intent = key
+            break
+
+    if chosen_intent:
+        base_url = SOURCE_URLS[chosen_intent]
+        if student_code and chosen_intent in AUTH_INTENTS:
+            return _append_query_params(base_url, {"pv_codigo": student_code})
+        return base_url
+
+    if context_type:
+        base_url = SOURCE_URLS_BY_CONTEXT.get(context_type, DEFAULT_SOURCE_URL)
+        if student_code and context_type in AUTH_CONTEXT_LABELS:
+            return _append_query_params(base_url, {"pv_codigo": student_code})
+        return base_url
+    return DEFAULT_SOURCE_URL
 
 
 # ---------------------------------------------------------------------------
 # Lógica principal
 # ---------------------------------------------------------------------------
+async def _call_auth_tool(session: ClientSession, tool_name: str, context_label: str, is_authenticated: bool, verbose: bool) -> str:
+    """Função auxiliar para chamar ferramentas que requerem login e processar logs visuais."""
+    if not is_authenticated:
+        return f"\n[NOTA: Dados de {context_label} requerem login no SIGARRA.]"
+    
+    if verbose:
+        print(f"  [MCP] A obter {context_label}...", end=" ", flush=True)
+        
+    result = await session.call_tool(tool_name, arguments={})
+    data = result.content[0].text if result.content else ""
+    
+    if verbose:
+        print("OK")
+        
+    global _conversation_context
+    _conversation_context = {"type": context_label, "data": data}
+    return f"\nDados ({context_label}):\n{data}"
+
 
 async def ask(question: str, session: ClientSession, is_authenticated: bool = False, verbose: bool = True) -> str:
-    """
-    Envia uma pergunta em linguagem natural.
-    Usa MCP para obter dados do SIGARRA e a API da universidade para responder.
-
-    Args:
-        question: Pergunta do utilizador
-        session: Sessão MCP já inicializada
-        is_authenticated: Se o utilizador está autenticado no SIGARRA
-        verbose: Se deve imprimir output detalhado
-
-    Retorna a resposta final do modelo.
-    """
     global _conversation_context
     
-    # Listar ferramentas MCP disponíveis
-    tools_result = await session.list_tools()
     if verbose:
-        names = [tool.name for tool in tools_result.tools]
-        print(f"  [MCP] Ferramentas: {names}")
+        tools_result = await session.list_tools()
+        print(f"  [MCP] Ferramentas disponíveis: {[t.name for t in tools_result.tools]}")
 
-    # Obter data atual (sempre útil)
+    # Obter data atual sempre
     date_result = await session.call_tool("get_current_date", arguments={})
-    current_date = date_result.content[0].text if date_result.content else ""
-
-    # Detectar tipo de pergunta e chamar tools apropriadas
+    context_parts = [f"Data de hoje: {date_result.content[0].text if date_result.content else ''}"]
+    
     question_lower = question.lower()
-    context_parts = [f"Data de hoje: {current_date}"]
     
-    # Palavras-chave para docentes
-    teacher_keywords = ["professor", "docente", "email", "gabinete", "contacto"]
-    is_teacher_question = any(kw in question_lower for kw in teacher_keywords)
-    
-    # Palavras-chave para calendário
-    calendar_keywords = ["calendário", "semestre", "férias", "feriado", "época", "inscrições"]
-    is_calendar_question = any(kw in question_lower for kw in calendar_keywords)
+    # 1. Agrupamento e deteção de intenções
+    intents = {
+        "teacher": any(kw in question_lower for kw in ["professor", "docente", "email", "gabinete", "contacto"]),
+        "course": any(kw in question_lower for kw in ["uc", "unidade curricular", "disciplina", "cadeira", "programa", "avaliação", "avaliacao", "objetivos", "objectivos"]),
+        "calendar": any(kw in question_lower for kw in ["calendário", "semestre", "férias", "feriado", "época", "exames", "exame"]),
+        "canteen": any(kw in question_lower for kw in ["cantina", "menu", "ementa", "almoço", "jantar"]),
+        "parking": any(kw in question_lower for kw in ["parque", "estacionamento", "parking", "lugares"]),
+        "schedule": any(kw in question_lower for kw in ["horário", "horario", "aulas", "meu horário"]),
+        "exams": any(kw in question_lower for kw in ["meus exames", "exames inscritos", "quando tenho exame", "minha prova"]),
+        "profile": any(kw in question_lower for kw in ["meu perfil", "meus dados", "meu curso", "meu número"]),
+        "grades": any(kw in question_lower for kw in ["minhas notas", "minha nota", "nota", "notas", "média"]),
+        "enrollments": any(kw in question_lower for kw in ["minhas inscrições", "inscrições", "inscritos", "uc inscritas"]),
+        "follow_up": any(kw in question_lower for kw in ["qual delas", "qual é", "quantas", "quais", "mostra", "qual tem", "maior"]) and _conversation_context["type"]
+    }
+    source_url_override = None
 
-    # Palavras-chave para cantina
-    canteen_keywords = ["cantina", "menu", "ementa", "almoço", "jantar"]
-    is_canteen_question = any(kw in question_lower for kw in canteen_keywords)
+    # 2. Processamento do Follow-Up
+    if intents["follow_up"] and _conversation_context["data"]:
+        if verbose: print(f"  [MCP] Follow-up detectado sobre {_conversation_context['type']}...")
+        ctx_data = _conversation_context["data"]
+        if len(ctx_data) > 2000:
+            ctx_data = ctx_data[:2000] + "\n[... mais dados truncados ...]"
+        context_parts.append(f"\n--- Contexto anterior ({_conversation_context['type']}) ---\n{ctx_data}")
 
-    # Palavras-chave para estacionamento
-    parking_keywords = ["parque", "estacionamento", "parking", "lugares"]
-    is_parking_question = any(kw in question_lower for kw in parking_keywords)
-    
-    # Palavras-chave para dados pessoais (requer autenticação)
-    schedule_keywords = ["horário", "horario", "aulas hoje", "que aulas", "meu horário"]
-    is_schedule_question = any(kw in question_lower for kw in schedule_keywords)
-    
-    exam_keywords = ["meus exames", "exames inscritos", "quando tenho exame", "minha prova"]
-    is_exam_question = any(kw in question_lower for kw in exam_keywords)
-    
-    profile_keywords = ["meu perfil", "meus dados", "meu curso", "meu número"]
-    is_profile_question = any(kw in question_lower for kw in profile_keywords)
-    
-    # Palavras-chave para notas (requer autenticação)
-    grades_keywords = ["minhas notas", "minha nota", "nota", "notas", "grades", "classificação", "resultado", "média"]
-    is_grades_question = any(kw in question_lower for kw in grades_keywords)
-    
-    # Palavras-chave para inscrições (requer autenticação)
-    enrollments_keywords = ["minhas inscrições", "inscrições", "inscritos em", "que ucs", "uc inscritas", "disciplinas inscritas", "ects"]
-    is_enrollments_question = any(kw in question_lower for kw in enrollments_keywords)
-    
-    # Detectar follow-ups (perguntas sobre dados já consultados)
-    follow_up_keywords = [
-        "qual delas", "qual é a", "qual é o", "quantas", "quais",
-        "mostre", "mostra", "qual é mais", "qual tem",
-        "a maior", "a menor", "a melhor", "a pior"
-    ]
-    is_follow_up = any(kw in question_lower for kw in follow_up_keywords) and _conversation_context["type"]
-    
-    # Se for follow-up, reutilizar contexto anterior (truncado para evitar limite de tokens)
-    if is_follow_up and _conversation_context["data"]:
-        if verbose:
-            print(f"  [MCP] Follow-up detectado sobre {_conversation_context['type']}...")
-        # Truncar contexto para evitar limite de tokens da API
-        context_data = _conversation_context["data"]
-        if len(context_data) > 2000:
-            context_data = context_data[:2000] + "\n[... mais dados truncados ...]"
-        context_parts.append(f"\n--- Contexto da pergunta anterior ({_conversation_context['type']}) ---")
-        context_parts.append(context_data)
-    
-    # Perguntas genéricas de exames (calendário)
-    general_exam_keywords = ["exame", "exames", "época de exames"]
-    is_general_exam = any(kw in question_lower for kw in general_exam_keywords) and not is_exam_question
-    if is_general_exam:
-        is_calendar_question = True
-    
-    # Obter horário pessoal (requer autenticação)
-    if is_schedule_question:
-        if is_authenticated:
-            if verbose:
-                print("  [MCP] A obter horário pessoal...", end=" ", flush=True)
-            result = await session.call_tool("get_my_schedule", arguments={})
-            data = result.content[0].text if result.content else ""
-            context_parts.append(f"\nHorário do estudante:\n{data}")
-            _conversation_context = {"type": "schedule", "data": data}
-            if verbose:
-                print("OK")
-        else:
-            context_parts.append("\n[NOTA: Dados de horário requerem login. O utilizador não está autenticado.]")
+    # 3. Execução das Ferramentas Privadas
+    if intents["schedule"]:
+        context_parts.append(await _call_auth_tool(session, "get_my_schedule", "horário", is_authenticated, verbose))
+    if intents["exams"]:
+        context_parts.append(await _call_auth_tool(session, "get_my_exams", "exames", is_authenticated, verbose))
+    if intents["profile"]:
+        context_parts.append(await _call_auth_tool(session, "get_my_profile", "perfil", is_authenticated, verbose))
+    if intents["grades"]:
+        context_parts.append(await _call_auth_tool(session, "get_my_grades", "notas", is_authenticated, verbose))
+    if intents["enrollments"]:
+        context_parts.append(await _call_auth_tool(session, "get_my_enrollments", "inscrições", is_authenticated, verbose))
 
-    # Obter exames inscritos (requer autenticação)
-    if is_exam_question:
-        if is_authenticated:
-            if verbose:
-                print("  [MCP] A obter exames inscritos...", end=" ", flush=True)
-            result = await session.call_tool("get_my_exams", arguments={})
-            data = result.content[0].text if result.content else ""
-            context_parts.append(f"\nExames inscritos:\n{data}")
-            _conversation_context = {"type": "exams", "data": data}
-            if verbose:
-                print("OK")
-        else:
-            context_parts.append("\n[NOTA: Dados de exames requerem login. O utilizador não está autenticado.]")
-
-    # Obter perfil pessoal (requer autenticação)
-    if is_profile_question:
-        if is_authenticated:
-            if verbose:
-                print("  [MCP] A obter perfil...", end=" ", flush=True)
-            result = await session.call_tool("get_my_profile", arguments={})
-            data = result.content[0].text if result.content else ""
-            context_parts.append(f"\nPerfil do estudante:\n{data}")
-            _conversation_context = {"type": "profile", "data": data}
-            if verbose:
-                print("OK")
-        else:
-            context_parts.append("\n[NOTA: Dados de perfil requerem login. O utilizador não está autenticado.]")
-
-    # Obter notas (requer autenticação)
-    if is_grades_question:
-        if is_authenticated:
-            if verbose:
-                print("  [MCP] A obter notas...", end=" ", flush=True)
-            result = await session.call_tool("get_my_grades", arguments={})
-            data = result.content[0].text if result.content else ""
-            context_parts.append(f"\nNotas do estudante:\n{data}")
-            _conversation_context = {"type": "grades", "data": data}
-            if verbose:
-                print("OK")
-        else:
-            context_parts.append("\n[NOTA: Dados de notas requerem login. Primeiro faça 'login' com suas credenciais SIGARRA.]")
-
-    # Obter inscrições (requer autenticação)
-    if is_enrollments_question:
-        if is_authenticated:
-            if verbose:
-                print("  [MCP] A obter inscrições...", end=" ", flush=True)
-            result = await session.call_tool("get_my_enrollments", arguments={})
-            data = result.content[0].text if result.content else ""
-            context_parts.append(f"\nInscrições do estudante:\n{data}")
-            _conversation_context = {"type": "enrollments", "data": data}
-            if verbose:
-                print("OK")
-        else:
-            context_parts.append("\n[NOTA: Dados de inscrições requerem login. Primeiro faça 'login' com suas credenciais SIGARRA.]")
-
-    # Obter dados de docentes se necessário
-    if is_teacher_question:
-        if verbose:
-            print("  [MCP] Pesquisando docentes...", end=" ", flush=True)
-        
-        # Extrair possível nome do professor da pergunta
-        name_match = re.search(r'(?:professor|docente|prof\.?)\s+([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)', question, re.IGNORECASE)
-        
-        if name_match:
-            teacher_name = name_match.group(1)
-            search_result = await session.call_tool("search_teachers", arguments={"nome": teacher_name})
-            search_data = search_result.content[0].text if search_result.content else ""
-            context_parts.append(f"\nResultados da pesquisa de docentes:\n{search_data}")
+    # 4. Execução das Ferramentas Públicas
+    if intents["teacher"]:
+        if verbose: print("  [MCP] A pesquisar docentes...", end=" ", flush=True)
+        match = re.search(r'(?:professor|docente|prof\.?)\s+([a-zà-ú]+(?:\s+[a-zà-ú]+)*)', question_lower)
+        if match:
+            search_res = await session.call_tool("search_teachers", arguments={"nome": match.group(1)})
+            data = search_res.content[0].text if search_res.content else ""
+            context_parts.append(f"\nPesquisa de docentes:\n{data}")
+            _conversation_context = {"type": "docentes", "data": data}
             
-            # Obter perfis de todos os docentes encontrados (até 3)
-            code_matches = re.findall(r'código:\s*(\d+)', search_data)
-            for i, codigo in enumerate(code_matches[:3]):  # Máximo 3 perfis
-                profile_result = await session.call_tool("get_teacher_profile", arguments={"codigo": int(codigo)})
-                profile_data = profile_result.content[0].text if profile_result.content else ""
-                context_parts.append(f"\nPerfil do docente {i+1}:\n{profile_data}")
-        
-        if verbose:
-            print("OK")
+            for i, codigo in enumerate(re.findall(r'código:\s*(\d+)', data)[:2]):
+                prof_res = await session.call_tool("get_teacher_profile", arguments={"codigo": int(codigo)})
+                context_parts.append(f"\nPerfil {i+1}:\n{prof_res.content[0].text if prof_res.content else ''}")
+        if verbose: print("OK")
 
-    # Devolver o menu da cantina
-    if is_canteen_question:
-        if verbose:
-            print("  [MCP] A obter menu da cantina...", end=" ", flush=True)
+    if intents["course"]:
+        if verbose: print("  [MCP] A pesquisar UC...", end=" ", flush=True)
+        course_match = re.search(
+            r'(?:uc|unidade curricular|disciplina|cadeira|programa)(?:\s+de|\s+da|\s+do)?\s+([a-zà-ú0-9\-]+(?:\s+[a-zà-ú0-9\-]+)*)',
+            question_lower,
+        )
+        uc_query = course_match.group(1).strip(" .?!") if course_match else question.strip()
 
-        result = await session.call_tool("get_canteen_menu", arguments={})
-        data = result.content[0].text if result.content else ""
+        search_res = await session.call_tool("search_courses", arguments={"query": uc_query})
+        search_data = search_res.content[0].text if search_res.content else ""
+        context_parts.append(f"\nResultados da pesquisa de UCs:\n{search_data}")
+        _conversation_context = {"type": "uc", "data": search_data}
 
-        context_parts.append(f"\nMenu das cantinas:\n{data}")
+        found_ids = re.findall(r'ocorrencia_id:\s*(\d+)', search_data)
+        if found_ids:
+            selected_id = found_ids[0]
+            info_res = await session.call_tool("get_course_info", arguments={"ocorrencia_id": int(selected_id)})
+            info_data = info_res.content[0].text if info_res.content else ""
+            context_parts.append(f"\nFicha da UC encontrada:\n{info_data}")
+            _conversation_context = {"type": "uc", "data": info_data}
+            source_url_override = _append_query_params(COURSE_INFO_VIEW_URL, {"pv_ocorrencia_id": selected_id})
+            if len(found_ids) > 1:
+                context_parts.append("\nNota: Foram encontradas várias UCs; os detalhes acima referem-se ao primeiro resultado.")
+        else:
+            source_url_override = SOURCE_URLS["course"]
 
-        if verbose:
-            print("OK")
+        if verbose: print("OK")
 
-    # Obter o status do estacionamento
-    if is_parking_question:
-        if verbose:
-            print("  [MCP] A obter estado dos parques...", end=" ", flush=True)
+    if intents["canteen"]:
+        if verbose: print("  [MCP] A obter cantina...", end=" ", flush=True)
+        res = await session.call_tool("get_canteen_menu", arguments={})
+        context_parts.append(f"\nCantinas:\n{res.content[0].text if res.content else ''}")
+        if verbose: print("OK")
 
-        result = await session.call_tool("get_parking_status", arguments={})
-        data = result.content[0].text if result.content else ""
+    if intents["parking"]:
+        if verbose: print("  [MCP] A obter parques...", end=" ", flush=True)
+        res = await session.call_tool("get_parking_status", arguments={})
+        context_parts.append(f"\nParques:\n{res.content[0].text if res.content else ''}")
+        if verbose: print("OK")
 
-        context_parts.append(f"\nEstado dos parques:\n{data}")
+    if intents["calendar"]:
+        if verbose: print("  [MCP] A obter calendário...", end=" ", flush=True)
+        res = await session.call_tool("get_academic_calendar", arguments={})
+        data = res.content[0].text if res.content else ""
+        context_parts.append(f"\nCalendário escolar:\n{data[:8000]}")
+        if verbose: print("OK")
 
-        if verbose:
-            print("OK")
+    student_code = await _get_student_code(session, is_authenticated)
+    source_url = _choose_source_url(intents, _conversation_context["type"], student_code)
+    if source_url_override:
+        source_url = source_url_override
 
-    # Obter calendário se necessário
-    if is_calendar_question:
-        if verbose:
-            print("  [MCP] A obter calendário...", end=" ", flush=True)
-        
-        calendar_result = await session.call_tool("get_academic_calendar", arguments={})
-        calendar_data = calendar_result.content[0].text if calendar_result.content else ""
-        context_parts.append(f"\nDados do calendário escolar da FEUP:\n---\n{calendar_data[:8000]}\n---")
-        
-        if verbose:
-            print("OK")
-
-    # Construir mensagem com contexto do SIGARRA (via MCP)
-    enriched_message = f"""{chr(10).join(context_parts)}
-
-Pergunta do utilizador: {question}
-
-Responde com base nos dados acima. Se a informação não estiver disponível, indica isso claramente."""
-
-    # Enviar para a API da universidade
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "x-api-key": API_KEY,
-    }
+    # 5. Comunicação com a API (LLM)
+    enriched_message = (
+        f"""{chr(10).join(context_parts)}\n\nPergunta do utilizador: {question}\nResponde com base nos dados fornecidos."""
+        " Não incluas URLs na resposta."
+    )
     
-    thread_id = str(uuid.uuid4())
+    if verbose: print("Resposta: ", end="", flush=True)
     
-    payload = {
-        "message": enriched_message,
-        "thread_id": thread_id,
-        "channel_id": CHANNEL_ID,
-        "user_info": json.dumps({"id": "user", "name": "Utilizador"})
-    }
+    headers = {"Authorization": f"Bearer {API_KEY}", "x-api-key": API_KEY}
+    payload = {"message": enriched_message, "thread_id": str(uuid.uuid4()), "channel_id": CHANNEL_ID, "user_info": json.dumps({"id": "user", "name": "Utilizador"})}
     
-    if verbose:
-        print("Resposta: ", end="", flush=True)
-    
-    async with httpx.AsyncClient(timeout=120) as client:
-        try:
-            async with client.stream(
-                "POST",
-                API_ENDPOINT,
-                headers=headers,
-                data=payload,
-            ) as response:
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", API_ENDPOINT, headers=headers, data=payload) as response:
                 if response.status_code != 200:
-                    await response.aread()
-                    return f"Erro HTTP {response.status_code}: {response.text}"
+                    return f"Erro HTTP {response.status_code} na API do LLM."
                 
                 full_response = ""
                 async for chunk in response.aiter_text():
-                    for line in chunk.split("\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
+                    for line in filter(None, chunk.split("\n")):
                         try:
                             data = json.loads(line)
-                            msg_type = data.get("type", "")
-                            content = data.get("content", "")
-                            
-                            if msg_type == "token" and isinstance(content, str):
-                                full_response += content
-                                if verbose:
-                                    print(content, end="", flush=True)
-                            elif msg_type == "message" and isinstance(content, dict):
-                                final_content = content.get("content", "")
-                                if final_content and not full_response:
-                                    full_response = final_content
-                                    
+                            if data.get("type") == "token":
+                                full_response += data.get("content", "")
+                                if verbose: print(data.get("content", ""), end="", flush=True)
                         except json.JSONDecodeError:
-                            continue
-                
+                            pass
+                answer = full_response.strip() or "Sem resposta do LLM."
+                answer_with_source = f"{answer}\n\nFonte: {source_url}"
                 if verbose:
-                    print()
-                    
-                if full_response:
-                    return full_response.strip()
-                    
-        except httpx.HTTPStatusError as exc:
-            return f"Erro HTTP {exc.response.status_code}"
-        except Exception as exc:
-            return f"Erro ao comunicar com a API: {exc}"
-    
-    return "Não foi possível obter uma resposta."
+                    print(f"\n\nFonte: {source_url}")
+                return answer_with_source
+    except Exception as exc:
+        return f"Erro ao comunicar com a API: {exc}"
 
 
 def _banner() -> None:
     print("=" * 60)
-    print("  Assistente SIGARRA — FEUP")
-    print("  MCP Server + API iaedu.pt")
+    print("  Assistente SIGARRA — FEUP (MCP Server + LLM)")
     print("=" * 60)
 
 
 async def do_login(session: ClientSession) -> bool:
-    """
-    Pede credenciais e faz login no SIGARRA.
-    Retorna True se login bem-sucedido.
-    """
-    print("\n" + "-" * 40)
-    print("  LOGIN SIGARRA")
-    print("-" * 40)
-    print("(Digite Enter vazio para saltar login)\n")
-    
-    username = input("Username (ex: up123456789): ").strip()
-    if not username:
-        print("Login ignorado. A continuar sem autenticação...")
-        return False
+    print("\n" + "-" * 40 + "\n  LOGIN SIGARRA\n" + "-" * 40)
+    username = input("Username (ex: up123456789) [Enter para saltar]: ").strip()
+    if not username: return False
     
     password = getpass("Password: ")
-    if not password:
-        print("Password vazia. A continuar sem autenticação...")
-        return False
+    if not password: return False
     
     print("\nA autenticar...", end=" ", flush=True)
-    result = await session.call_tool("login", arguments={
-        "username": username,
-        "password": password
-    })
-    response = result.content[0].text if result.content else "Erro desconhecido"
-    print("\n")
-    print(response)
-    
+    result = await session.call_tool("login", arguments={"username": username, "password": password})
+    response = result.content[0].text if result.content else ""
+    print(f"\n{response}")
     return "bem-sucedido" in response.lower()
 
 
 async def interactive_mode() -> None:
-    """Modo de conversa interactiva em loop com login."""
     _banner()
-    
-    # Conectar ao servidor MCP
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[str(SERVER_SCRIPT)],
-    )
+    server_params = StdioServerParameters(command=sys.executable, args=[str(SERVER_SCRIPT)])
     
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            
-            # Pedir login
             is_authenticated = await do_login(session)
             
-            if is_authenticated:
-                print("\nPodes perguntar sobre: horário, exames, perfil, calendário, docentes, cantina, estacionamento...")
-            else:
-                print("\nPodes perguntar sobre: calendário, docentes, cantina, estacionamento...")
-                print("(Para dados pessoais como horário/exames, faz login.)")
-            
             print("\nEscreva a sua pergunta ou 'sair' para terminar.\n")
-
             while True:
                 try:
-                    question = input("Pergunta: ").strip()
+                    question = input("\nPergunta: ").strip()
                 except (EOFError, KeyboardInterrupt):
-                    print("\nA terminar…")
                     break
 
-                if not question:
-                    continue
+                if not question: continue
                 if question.lower() in {"sair", "exit", "quit"}:
                     if is_authenticated:
                         await session.call_tool("logout", arguments={})
-                        print("Sessão terminada.")
                     break
 
                 print()
                 await ask(question, session, is_authenticated)
-                print()
 
 
 async def single_question_mode(question: str) -> None:
-    """Modo de pergunta única passada na linha de comandos (sem login)."""
     _banner()
     print(f"\nPergunta: {question}\n")
-    
-    # Conectar ao servidor MCP
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[str(SERVER_SCRIPT)],
-    )
-    
+    server_params = StdioServerParameters(command=sys.executable, args=[str(SERVER_SCRIPT)])
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             await ask(question, session, is_authenticated=False)
-            print()
 
-
-# ---------------------------------------------------------------------------
-# Ponto de entrada
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     if not API_KEY:
-        print(
-            "Erro: a variável API_KEY não está definida.\n"
-            "Crie um ficheiro .env com:\n"
-            "  API_KEY=sk-usr-...\n"
-            "  CHANNEL_ID=cmm2882wh19xwj601blybmzhy"
-        )
+        print("Erro: API_KEY em falta no ficheiro .env")
         sys.exit(1)
 
     if len(sys.argv) > 1:
-        question = " ".join(sys.argv[1:])
-        asyncio.run(single_question_mode(question))
+        asyncio.run(single_question_mode(" ".join(sys.argv[1:])))
     else:
         asyncio.run(interactive_mode())
 
