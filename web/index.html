@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SIGARRA Assistant</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">S</div>
+          <div>
+            <h1>SIGARRA Assistant</h1>
+            <p>Site em desenvolvimento</p>
+          </div>
+        </div>
+
+        <button id="new-chat" class="ghost-btn">Nova conversa</button>
+
+        <section class="meta-card conversations-card">
+          <h2>Historico</h2>
+          <div id="conversation-list" class="conversation-list"></div>
+        </section>
+
+        <section class="meta-card">
+          <h2>Conta SIGARRA</h2>
+          <p id="session-status">A verificar estado...</p>
+
+          <form id="login-form" class="login-form">
+            <input id="username" type="text" placeholder="Username (up...)" required />
+            <input id="password" type="password" placeholder="Password" required />
+            <button type="submit">Entrar</button>
+          </form>
+
+          <button id="logout-btn" class="ghost-btn small">Terminar sessao</button>
+        </section>
+
+        <section class="meta-card">
+          <h2>Notas do projeto</h2>
+          <p>Autenticacao federada e deployment em VM: pendente.</p>
+          <p>Privacidade: esta interface nao guarda credenciais em disco.</p>
+        </section>
+      </aside>
+
+      <main class="chat-area">
+        <header class="chat-header">
+          <h2>Conversa</h2>
+          <p>Respostas com fonte web do SIGARRA quando disponivel.</p>
+        </header>
+
+        <section id="messages" class="messages"></section>
+
+        <form id="chat-form" class="composer">
+          <textarea
+            id="message-input"
+            placeholder="Pergunta algo sobre horario, exames, UCs, docentes, cantina..."
+            rows="2"
+            required
+          ></textarea>
+          <button type="submit" id="send-btn">Enviar</button>
+        </form>
+      </main>
+    </div>
+
+    <template id="message-template">
+      <article class="msg-row">
+        <div class="msg-bubble"></div>
+      </article>
+    </template>
+
+    <script src="/web/app.js"></script>
+  </body>
+</html>

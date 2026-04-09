@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# Dados locais da UI web
+sigarra_ui.db
