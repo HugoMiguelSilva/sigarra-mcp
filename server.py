@@ -353,7 +353,7 @@ async def login(username: str, password: str) -> str:
             
             if not data.get('authenticated'):
                 _session = SigarraSession(authenticated=False, error_msg="Credenciais inválidas")
-                return "Falha na autenticação: credenciais inválidas."
+                return "Autenticação falhada."
 
             codigo = data.get('codigo')
             nome = username
@@ -377,7 +377,7 @@ async def login(username: str, password: str) -> str:
             return f"Login bem-sucedido! Bem-vindo(a), {_session.nome}."
     except Exception as exc:
         _session = SigarraSession(authenticated=False, error_msg=str(exc))
-        return f"Erro ao autenticar: {exc}"
+        return "Erro ao autenticar: falha na conexão ou credenciais inválidas."
 
 
 @mcp.tool()
