@@ -8,6 +8,7 @@ const messageInput = document.getElementById("message-input");
 const sendBtn = document.getElementById("send-btn");
 const sessionStatusEl = document.getElementById("session-status");
 const conversationListEl = document.getElementById("conversation-list");
+const loginErrorEl = document.getElementById("login-error");
 
 let currentConversationId = null;
 
@@ -179,6 +180,10 @@ chatForm.addEventListener("submit", async (event) => {
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
+  // Clear previous error
+  loginErrorEl.textContent = "";
+  loginErrorEl.style.display = "none";
+
   const username = document.getElementById("username").value.trim();
   const password = document.getElementById("password").value;
 
@@ -190,10 +195,16 @@ loginForm.addEventListener("submit", async (event) => {
     });
 
     const data = await response.json();
-    appendMessage("assistant", data.message || "Sem resposta de login.");
+    if (data.ok) {
+      appendMessage("assistant", data.message || "Login realizado com sucesso.");
+    } else {
+      loginErrorEl.textContent = data.message || "Erro desconhecido.";
+      loginErrorEl.style.display = "block";
+    }
     await refreshSessionStatus();
   } catch (_) {
-    appendMessage("assistant", "Erro ao efetuar login.");
+    loginErrorEl.textContent = "Erro ao efetuar login.";
+    loginErrorEl.style.display = "block";
   }
 });
 
