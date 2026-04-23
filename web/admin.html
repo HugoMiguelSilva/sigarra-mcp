@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin - SIGARRA Assistant</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body>
+    <div class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <h1>Admin Dashboard</h1>
+          <p>Métricas de utilização, desempenho e qualidade das respostas</p>
+        </div>
+        <div class="admin-header-actions">
+          <select id="granularity-select">
+            <option value="day">Por dia</option>
+            <option value="week">Por semana</option>
+            <option value="month">Por mês</option>
+          </select>
+          <button id="refresh-admin">Atualizar</button>
+          <a class="ghost-btn" href="/">Voltar ao chat</a>
+        </div>
+      </header>
+
+      <main class="admin-content">
+        <section class="admin-cards" id="admin-cards"></section>
+
+        <section class="admin-grid">
+          <article class="meta-card admin-panel">
+            <h2>Timeline (perguntas e respostas)</h2>
+            <div id="timeline-table"></div>
+          </article>
+
+          <article class="meta-card admin-panel">
+            <h2>Conversations ao longo do tempo</h2>
+            <div id="conversations-timeline-table"></div>
+          </article>
+        </section>
+
+        <section class="admin-grid">
+          <article class="meta-card admin-panel">
+            <h2>Tools MCP usadas</h2>
+            <div id="tools-table"></div>
+          </article>
+
+          <article class="meta-card admin-panel">
+            <h2>Perguntas sem suporte</h2>
+            <div id="unsupported-list"></div>
+          </article>
+        </section>
+
+        <section class="meta-card admin-panel">
+          <h2>Respostas insatisfatórias (dislike)</h2>
+          <div id="disliked-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/web/admin.js"></script>
+  </body>
+</html>

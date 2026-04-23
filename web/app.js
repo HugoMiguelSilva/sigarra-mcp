@@ -24,7 +24,7 @@ function clearMessages() {
   messagesEl.innerHTML = "";
 }
 
-function appendMessage(role, text, sourceUrl = null) {
+function appendMessage(role, text, sourceUrl = null, messageId = null, feedback = null) {
   const node = template.content.firstElementChild.cloneNode(true);
   if (role === "user") node.classList.add("user");
 
@@ -42,8 +42,49 @@ function appendMessage(role, text, sourceUrl = null) {
     bubble.appendChild(link);
   }
 
+  if (role === "assistant" && messageId) {
+    const actions = document.createElement("div");
+    actions.className = "msg-actions";
+
+    const dislikeBtn = document.createElement("button");
+    dislikeBtn.type = "button";
+    dislikeBtn.className = "msg-feedback-btn";
+    if (feedback === -1) {
+      dislikeBtn.classList.add("active");
+    }
+    dislikeBtn.textContent = "Nao ajudou";
+    dislikeBtn.addEventListener("click", async () => {
+      const ok = await sendFeedback(messageId, "dislike");
+      if (ok) {
+        dislikeBtn.classList.add("active");
+      }
+    });
+
+    actions.appendChild(dislikeBtn);
+    bubble.appendChild(actions);
+  }
+
   messagesEl.appendChild(node);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+async function sendFeedback(messageId, feedback) {
+  try {
+    const response = await fetch(`/api/messages/${messageId}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feedback }),
+    });
+    if (!response.ok) {
+      const data = await response.json();
+      appendMessage("assistant", data.detail || "Erro ao registar feedback.");
+      return false;
+    }
+    return true;
+  } catch (_) {
+    appendMessage("assistant", "Erro de rede ao registar feedback.");
+    return false;
+  }
 }
 
 function renderConversations(conversations) {
@@ -168,7 +209,7 @@ async function loadConversation(conversationId, updateList = true) {
     clearMessages();
 
     (data.messages || []).forEach((msg) => {
-      appendMessage(msg.role, msg.text, msg.source_url || null);
+      appendMessage(msg.role, msg.text, msg.source_url || null, msg.id || null, msg.feedback ?? null);
     });
 
     if (!data.messages || !data.messages.length) {
@@ -221,7 +262,13 @@ async function sendMessage() {
       currentConversationId = data.conversation_id;
     }
 
-    appendMessage("assistant", data.answer || "Sem resposta.", data.source_url || null);
+    appendMessage(
+      "assistant",
+      data.answer || "Sem resposta.",
+      data.source_url || null,
+      data.assistant_message_id || null,
+      null,
+    );
     await refreshConversations();
   } catch (_) {
     appendMessage("assistant", "Erro de rede ao comunicar com o servidor.");

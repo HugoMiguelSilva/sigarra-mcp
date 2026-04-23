@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
@@ -85,6 +86,14 @@ AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments", "curren
 AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições", "conta corrente"}
 
 _conversation_context = {"type": None, "data": None}
+_last_ask_meta = {"tools_used": [], "mcp_calls": 0}
+
+
+def get_last_ask_meta() -> dict:
+    return {
+        "tools_used": list(_last_ask_meta.get("tools_used", [])),
+        "mcp_calls": int(_last_ask_meta.get("mcp_calls", 0)),
+    }
 
 
 def _is_follow_up_question(question_lower: str, has_new_intent: bool) -> bool:
@@ -167,11 +176,16 @@ def _detect_response_language(question: str) -> str:
     return "en" if en_score > pt_score else "pt"
 
 
-async def _get_student_code(session: ClientSession, is_authenticated: bool) -> str | None:
+async def _get_student_code(
+    session: ClientSession,
+    is_authenticated: bool,
+    call_tool_fn=None,
+) -> str | None:
     if not is_authenticated:
         return None
     try:
-        result = await session.call_tool("get_session_status", arguments={})
+        call_tool = call_tool_fn or session.call_tool
+        result = await call_tool("get_session_status", arguments={})
         status = result.content[0].text if result.content else ""
         match = re.search(r"\((\d+)\)", status)
         return match.group(1) if match else None
@@ -222,7 +236,14 @@ def _choose_source_url(intents: dict, context_type: str | None, student_code: st
 # ---------------------------------------------------------------------------
 # Lógica principal
 # ---------------------------------------------------------------------------
-async def _call_auth_tool(session: ClientSession, tool_name: str, context_label: str, is_authenticated: bool, verbose: bool) -> str:
+async def _call_auth_tool(
+    session: ClientSession,
+    tool_name: str,
+    context_label: str,
+    is_authenticated: bool,
+    verbose: bool,
+    call_tool_fn=None,
+) -> str:
     """Função auxiliar para chamar ferramentas que requerem login e processar logs visuais."""
     if not is_authenticated:
         return f"\n[NOTA: Dados de {context_label} requerem login no SIGARRA.]"
@@ -230,7 +251,8 @@ async def _call_auth_tool(session: ClientSession, tool_name: str, context_label:
     if verbose:
         print(f"  [MCP] A obter {context_label}...", end=" ", flush=True)
         
-    result = await session.call_tool(tool_name, arguments={})
+    call_tool = call_tool_fn or session.call_tool
+    result = await call_tool(tool_name, arguments={})
     data = result.content[0].text if result.content else ""
     
     if verbose:
@@ -243,14 +265,20 @@ async def _call_auth_tool(session: ClientSession, tool_name: str, context_label:
 
 async def ask(question: str, session: ClientSession, is_authenticated: bool = False, verbose: bool = True) -> str:
     global _conversation_context
+    global _last_ask_meta
     current_account_summary = ""
+    tools_called_ordered = []
+
+    async def call_mcp_tool(tool_name: str, arguments: dict):
+        tools_called_ordered.append(tool_name)
+        return await session.call_tool(tool_name, arguments=arguments)
     
     if verbose:
         tools_result = await session.list_tools()
         print(f"  [MCP] Ferramentas disponíveis: {[t.name for t in tools_result.tools]}")
 
     # Obter data atual sempre
-    date_result = await session.call_tool("get_current_date", arguments={})
+    date_result = await call_mcp_tool("get_current_date", {})
     context_parts = [f"Data de hoje: {date_result.content[0].text if date_result.content else ''}"]
     
     question_lower = question.lower()
@@ -299,17 +327,69 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
 
     # 3. Execução das Ferramentas Privadas
     if intents["schedule"]:
-        context_parts.append(await _call_auth_tool(session, "get_my_schedule", "horário", is_authenticated, verbose))
+        context_parts.append(
+            await _call_auth_tool(
+                session,
+                "get_my_schedule",
+                "horário",
+                is_authenticated,
+                verbose,
+                call_tool_fn=call_mcp_tool,
+            )
+        )
     if intents["exams"]:
-        context_parts.append(await _call_auth_tool(session, "get_my_exams", "exames", is_authenticated, verbose))
+        context_parts.append(
+            await _call_auth_tool(
+                session,
+                "get_my_exams",
+                "exames",
+                is_authenticated,
+                verbose,
+                call_tool_fn=call_mcp_tool,
+            )
+        )
     if intents["profile"]:
-        context_parts.append(await _call_auth_tool(session, "get_my_profile", "perfil", is_authenticated, verbose))
+        context_parts.append(
+            await _call_auth_tool(
+                session,
+                "get_my_profile",
+                "perfil",
+                is_authenticated,
+                verbose,
+                call_tool_fn=call_mcp_tool,
+            )
+        )
     if intents["grades"]:
-        context_parts.append(await _call_auth_tool(session, "get_my_grades", "notas", is_authenticated, verbose))
+        context_parts.append(
+            await _call_auth_tool(
+                session,
+                "get_my_grades",
+                "notas",
+                is_authenticated,
+                verbose,
+                call_tool_fn=call_mcp_tool,
+            )
+        )
     if intents["enrollments"]:
-        context_parts.append(await _call_auth_tool(session, "get_my_enrollments", "inscrições", is_authenticated, verbose))
+        context_parts.append(
+            await _call_auth_tool(
+                session,
+                "get_my_enrollments",
+                "inscrições",
+                is_authenticated,
+                verbose,
+                call_tool_fn=call_mcp_tool,
+            )
+        )
     if intents["current_account"]:
-        account_block = await _call_auth_tool(session, "get_my_current_account", "conta corrente", is_authenticated, verbose)
+        account_block = await _call_auth_tool(
+            session,
+            "get_my_current_account",
+            "conta corrente",
+            is_authenticated,
+            verbose,
+            call_tool_fn=call_mcp_tool,
+        )
         context_parts.append(account_block)
         marker = "\nDados (conta corrente):\n"
         if marker in account_block:
@@ -320,13 +400,13 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         if verbose: print("  [MCP] A pesquisar docentes...", end=" ", flush=True)
         match = re.search(r'(?:professor|docente|prof\.?)\s+([a-zà-ú]+(?:\s+[a-zà-ú]+)*)', question_lower)
         if match:
-            search_res = await session.call_tool("search_teachers", arguments={"nome": match.group(1)})
+            search_res = await call_mcp_tool("search_teachers", {"nome": match.group(1)})
             data = search_res.content[0].text if search_res.content else ""
             context_parts.append(f"\nPesquisa de docentes:\n{data}")
             _conversation_context = {"type": "docentes", "data": data}
             
             for i, codigo in enumerate(re.findall(r'código:\s*(\d+)', data)[:2]):
-                prof_res = await session.call_tool("get_teacher_profile", arguments={"codigo": int(codigo)})
+                prof_res = await call_mcp_tool("get_teacher_profile", {"codigo": int(codigo)})
                 context_parts.append(f"\nPerfil {i+1}:\n{prof_res.content[0].text if prof_res.content else ''}")
         if verbose: print("OK")
 
@@ -338,7 +418,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         )
         uc_query = course_match.group(1).strip(" .?!") if course_match else question.strip()
 
-        search_res = await session.call_tool("search_courses", arguments={"query": uc_query})
+        search_res = await call_mcp_tool("search_courses", {"query": uc_query})
         search_data = search_res.content[0].text if search_res.content else ""
         context_parts.append(f"\nResultados da pesquisa de UCs:\n{search_data}")
         _conversation_context = {"type": "uc", "data": search_data}
@@ -346,7 +426,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         found_ids = re.findall(r'ocorrencia_id:\s*(\d+)', search_data)
         if found_ids:
             selected_id = found_ids[0]
-            info_res = await session.call_tool("get_course_info", arguments={"ocorrencia_id": int(selected_id)})
+            info_res = await call_mcp_tool("get_course_info", {"ocorrencia_id": int(selected_id)})
             info_data = info_res.content[0].text if info_res.content else ""
             context_parts.append(f"\nFicha da UC encontrada:\n{info_data}")
             _conversation_context = {"type": "uc", "data": info_data}
@@ -360,7 +440,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
 
     if intents["canteen"]:
         if verbose: print("  [MCP] A obter cantina...", end=" ", flush=True)
-        res = await session.call_tool("get_canteen_menu", arguments={})
+        res = await call_mcp_tool("get_canteen_menu", {})
         data = res.content[0].text if res.content else ""
         context_parts.append(f"\nCantinas:\n{data}")
         _conversation_context = {"type": "cantina", "data": data}
@@ -368,7 +448,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
 
     if intents["parking"]:
         if verbose: print("  [MCP] A obter parques...", end=" ", flush=True)
-        res = await session.call_tool("get_parking_status", arguments={})
+        res = await call_mcp_tool("get_parking_status", {})
         data = res.content[0].text if res.content else ""
         context_parts.append(f"\nParques:\n{data}")
         _conversation_context = {"type": "parques", "data": data}
@@ -376,13 +456,13 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
 
     if intents["calendar"]:
         if verbose: print("  [MCP] A obter calendário...", end=" ", flush=True)
-        res = await session.call_tool("get_academic_calendar", arguments={})
+        res = await call_mcp_tool("get_academic_calendar", {})
         data = res.content[0].text if res.content else ""
         context_parts.append(f"\nCalendário escolar:\n{data[:8000]}")
         _conversation_context = {"type": "calendário", "data": data}
         if verbose: print("OK")
 
-    student_code = await _get_student_code(session, is_authenticated)
+    student_code = await _get_student_code(session, is_authenticated, call_tool_fn=call_mcp_tool)
     source_url = _choose_source_url(intents, _conversation_context["type"], student_code)
     if source_url_override:
         source_url = source_url_override
@@ -406,6 +486,10 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream("POST", API_ENDPOINT, headers=headers, data=payload) as response:
                 if response.status_code != 200:
+                    _last_ask_meta = {
+                        "tools_used": list(OrderedDict.fromkeys(tools_called_ordered).keys()),
+                        "mcp_calls": len(tools_called_ordered),
+                    }
                     return f"Erro HTTP {response.status_code} na API do LLM."
                 
                 full_response = ""
@@ -428,10 +512,18 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
                         print(answer, end="", flush=True)
 
                 answer_with_source = f"{answer}\n\nFonte: {source_url}"
+                _last_ask_meta = {
+                    "tools_used": list(OrderedDict.fromkeys(tools_called_ordered).keys()),
+                    "mcp_calls": len(tools_called_ordered),
+                }
                 if verbose:
                     print(f"\n\nFonte: {source_url}")
                 return answer_with_source
     except Exception as exc:
+        _last_ask_meta = {
+            "tools_used": list(OrderedDict.fromkeys(tools_called_ordered).keys()),
+            "mcp_calls": len(tools_called_ordered),
+        }
         return f"Erro ao comunicar com a API: {exc}"
 
 
