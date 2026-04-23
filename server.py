@@ -34,6 +34,7 @@ EXAMS_URL = f"{BASE_URL}/mob_fest_geral.exames"
 STUDENT_PROFILE_URL = f"{BASE_URL}/mob_fest_geral.perfil"
 MY_PROFILE_URL = f"{BASE_URL}/mob_fest_geral.percurso_academico"
 ENROLLMENTS_URL = f"{BASE_URL}/mob_fest_geral.ucurr_inscricoes_corrente"
+CURRENT_ACCOUNT_URL = f"{BASE_URL}/gpag_ccorrente_geral.conta_corrente_view"
 
 HEADERS = {
     "User-Agent": (
@@ -98,6 +99,19 @@ async def _make_auth_request(url: str, params: dict = None) -> dict:
         response = await client.get(url, params=full_params, headers=HEADERS)
         response.raise_for_status()
         return response.json()
+
+
+async def _make_auth_request_text(url: str, params: dict = None) -> str:
+    """Faz pedidos autenticados e devolve o corpo em texto (HTML)."""
+    if not _session.authenticated:
+        raise ValueError("Não está autenticado. Use a ferramenta 'login' primeiro.")
+    if not _is_session_valid():
+        raise ValueError("Sessão expirada. Por favor, faça login novamente.")
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, cookies=_session.cookies) as client:
+        response = await client.get(url, params=params or {}, headers=HEADERS)
+        response.raise_for_status()
+        return response.text
 
 
 async def _fetch_and_parse() -> str:
@@ -165,6 +179,105 @@ def _course_match_score(course_name: str, query: str) -> int:
     # Em empate, prefere nomes mais curtos e mais específicos.
     score -= abs(len(course_norm) - len(query_norm))
     return score
+
+
+def _coerce_float(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace("€", "")
+        cleaned = cleaned.replace(" ", "").replace(".", "").replace(",", ".")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _find_overdue_amount(payload) -> float | None:
+    """Procura recursivamente por campos de saldo vencido/em dívida."""
+    key_patterns = [
+        "saldo_vencido",
+        "valor_vencido",
+        "vencido",
+        "em_divida",
+        "divida",
+        "debt",
+        "overdue",
+        "total_em_divida",
+    ]
+
+    best_value = None
+
+    def visit(node):
+        nonlocal best_value
+
+        if isinstance(node, dict):
+            for k, v in node.items():
+                key = str(k).lower()
+                if any(pattern in key for pattern in key_patterns):
+                    amount = _coerce_float(v)
+                    if amount is not None:
+                        best_value = amount
+                visit(v)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(payload)
+    return best_value
+
+
+def _find_overdue_amount_in_text(text: str) -> float | None:
+    """Extrai saldo vencido de texto HTML da conta corrente."""
+    if not text:
+        return None
+
+    soup = BeautifulSoup(text, "html.parser")
+    page_text = soup.get_text(" ", strip=True)
+    lowered = page_text.lower()
+
+    marker_patterns = [
+        r"saldo\s+vencido",
+        r"valor\s+em\s+d[ií]vida",
+        r"total\s+em\s+d[ií]vida",
+        r"em\s+d[ií]vida",
+        r"vencido",
+    ]
+    amount_pattern = r"(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)\s*(?:eur|€)?"
+
+    for marker in marker_patterns:
+        for match in re.finditer(marker, lowered):
+            start = max(0, match.start() - 40)
+            end = min(len(page_text), match.end() + 120)
+            window = page_text[start:end]
+            amount_match = re.search(amount_pattern, window, flags=re.IGNORECASE)
+            if amount_match:
+                amount = _coerce_float(amount_match.group(1))
+                if amount is not None:
+                    return amount
+
+    # Fallback: tenta detetar montantes perto de palavras-chave.
+    for kw_match in re.finditer(r"vencido|divida|dívida", lowered):
+        start = max(0, kw_match.start() - 80)
+        end = min(len(page_text), kw_match.end() + 120)
+        window = page_text[start:end]
+        amount_match = re.search(amount_pattern, window, flags=re.IGNORECASE)
+        if amount_match:
+            amount = _coerce_float(amount_match.group(1))
+            if amount is not None:
+                return amount
+
+    # Fallback final: primeiro montante plausível na página.
+    amount_match = re.search(amount_pattern, page_text, flags=re.IGNORECASE)
+    if amount_match:
+        amount = _coerce_float(amount_match.group(1))
+        if amount is not None:
+            return amount
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +610,26 @@ async def get_my_grades() -> str:
         return "\n".join(lines)
     except Exception as exc:
         return str(exc)
+
+
+@mcp.tool()
+async def get_my_current_account() -> str:
+    """Obtém informação da conta corrente e destaca o saldo vencido."""
+    try:
+        html = await _make_auth_request_text(CURRENT_ACCOUNT_URL, {"pct_cod": str(_session.codigo)})
+        overdue = _find_overdue_amount_in_text(html)
+        if overdue is None:
+            return (
+                "Conta corrente: não foi possível identificar automaticamente o saldo vencido "
+                "na resposta do SIGARRA."
+            )
+
+        if overdue <= 0:
+            return "Conta corrente: não tens saldo vencido."
+
+        return f"Conta corrente: tens {overdue:.2f} EUR de saldo vencido."
+    except Exception as exc:
+        return f"Erro ao obter conta corrente: {exc}"
 
 
 if __name__ == "__main__":

@@ -45,6 +45,10 @@ class CreateConversationRequest(BaseModel):
     title: str | None = None
 
 
+class UpdateConversationTitleRequest(BaseModel):
+    title: str
+
+
 class AppState:
     def __init__(self) -> None:
         self.session: ClientSession | None = None
@@ -82,6 +86,21 @@ def _is_status_authenticated(status_text: str) -> bool:
     return "sessão activa" in status_lower or "sessao activa" in status_lower
 
 
+def _extract_account_scope(status_text: str, fallback_login: str | None = None) -> str:
+    """Extrai um identificador estavel da conta autenticada para isolar conversas."""
+    if not _is_status_authenticated(status_text):
+        return "anon"
+
+    match = re.search(r"\((\d+)\)", status_text)
+    if match:
+        return f"sigarra:{match.group(1)}"
+
+    if fallback_login:
+        return f"login:{fallback_login.lower()}"
+
+    return "authenticated"
+
+
 def _infer_conversation_title(message: str) -> str:
     cleaned = re.sub(r"\s+", " ", message).strip(" .?!")
     if not cleaned:
@@ -97,6 +116,7 @@ def _init_db(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             browser_id TEXT NOT NULL,
+            account_scope TEXT NOT NULL DEFAULT 'anon',
             title TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -120,10 +140,29 @@ def _init_db(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS browser_sessions (
             browser_id TEXT PRIMARY KEY,
-            authenticated INTEGER NOT NULL DEFAULT 0
+            authenticated INTEGER NOT NULL DEFAULT 0,
+            account_scope TEXT NOT NULL DEFAULT 'anon'
         )
         """
     )
+
+    # Migracao leve para bases de dados antigas sem as novas colunas.
+    conv_cols = {
+        row[1] for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+    }
+    if "account_scope" not in conv_cols:
+        connection.execute(
+            "ALTER TABLE conversations ADD COLUMN account_scope TEXT NOT NULL DEFAULT 'anon'"
+        )
+
+    browser_cols = {
+        row[1] for row in connection.execute("PRAGMA table_info(browser_sessions)").fetchall()
+    }
+    if "account_scope" not in browser_cols:
+        connection.execute(
+            "ALTER TABLE browser_sessions ADD COLUMN account_scope TEXT NOT NULL DEFAULT 'anon'"
+        )
+
     connection.commit()
 
 
@@ -145,17 +184,17 @@ def _get_or_create_browser_id(request: Request, response: Response) -> str:
 
 def _db_ensure_browser(browser_id: str) -> None:
     state.db.execute(
-        "INSERT OR IGNORE INTO browser_sessions(browser_id, authenticated) VALUES(?, 0)",
+        "INSERT OR IGNORE INTO browser_sessions(browser_id, authenticated, account_scope) VALUES(?, 0, 'anon')",
         (browser_id,),
     )
     state.db.commit()
 
 
-def _db_set_authenticated(browser_id: str, authenticated: bool) -> None:
+def _db_set_browser_session(browser_id: str, authenticated: bool, account_scope: str) -> None:
     _db_ensure_browser(browser_id)
     state.db.execute(
-        "UPDATE browser_sessions SET authenticated = ? WHERE browser_id = ?",
-        (1 if authenticated else 0, browser_id),
+        "UPDATE browser_sessions SET authenticated = ?, account_scope = ? WHERE browser_id = ?",
+        (1 if authenticated else 0, account_scope, browser_id),
     )
     state.db.commit()
 
@@ -169,20 +208,31 @@ def _db_get_authenticated(browser_id: str) -> bool:
     return bool(row[0]) if row else False
 
 
-def _db_create_conversation(browser_id: str, title: str) -> int:
+def _db_get_account_scope(browser_id: str) -> str:
+    _db_ensure_browser(browser_id)
+    row = state.db.execute(
+        "SELECT account_scope FROM browser_sessions WHERE browser_id = ?",
+        (browser_id,),
+    ).fetchone()
+    if not row or not row[0]:
+        return "anon"
+    return str(row[0])
+
+
+def _db_create_conversation(browser_id: str, account_scope: str, title: str) -> int:
     now = _utc_now()
     cursor = state.db.execute(
-        "INSERT INTO conversations(browser_id, title, created_at, updated_at) VALUES(?, ?, ?, ?)",
-        (browser_id, title, now, now),
+        "INSERT INTO conversations(browser_id, account_scope, title, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
+        (browser_id, account_scope, title, now, now),
     )
     state.db.commit()
     return int(cursor.lastrowid)
 
 
-def _db_conversation_exists(browser_id: str, conversation_id: int) -> bool:
+def _db_conversation_exists(browser_id: str, account_scope: str, conversation_id: int) -> bool:
     row = state.db.execute(
-        "SELECT id FROM conversations WHERE id = ? AND browser_id = ?",
-        (conversation_id, browser_id),
+        "SELECT id FROM conversations WHERE id = ? AND browser_id = ? AND account_scope = ?",
+        (conversation_id, browser_id, account_scope),
     ).fetchone()
     return row is not None
 
@@ -196,6 +246,15 @@ def _db_add_message(conversation_id: int, role: str, text: str, source_url: str 
     state.db.execute(
         "UPDATE conversations SET updated_at = ? WHERE id = ?",
         (now, conversation_id),
+    )
+    state.db.commit()
+
+
+def _db_update_conversation_title(conversation_id: int, title: str) -> None:
+    now = _utc_now()
+    state.db.execute(
+        "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+        (title, now, conversation_id),
     )
     state.db.commit()
 
@@ -255,8 +314,9 @@ async def session_status(request: Request, response: Response) -> dict:
     async with state.db_lock:
         ui_authenticated = _db_get_authenticated(browser_id)
         real_authenticated = _is_status_authenticated(status_text)
-        if ui_authenticated != real_authenticated:
-            _db_set_authenticated(browser_id, real_authenticated)
+        real_scope = _extract_account_scope(status_text)
+        if ui_authenticated != real_authenticated or _db_get_account_scope(browser_id) != real_scope:
+            _db_set_browser_session(browser_id, real_authenticated, real_scope)
 
     return {
         "authenticated": real_authenticated,
@@ -284,10 +344,15 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
             arguments={"username": username, "password": password},
         )
         response_text = result.content[0].text if result.content else ""
+        status_text = ""
+        if "bem-sucedido" in response_text.lower():
+            status_result = await state.session.call_tool("get_session_status", arguments={})
+            status_text = status_result.content[0].text if status_result.content else ""
 
     is_authenticated = "bem-sucedido" in response_text.lower()
+    account_scope = _extract_account_scope(status_text, fallback_login=username)
     async with state.db_lock:
-        _db_set_authenticated(browser_id, is_authenticated)
+        _db_set_browser_session(browser_id, is_authenticated, account_scope)
 
     return {
         "ok": is_authenticated,
@@ -309,7 +374,7 @@ async def logout(request: Request, response: Response) -> dict:
         response_text = result.content[0].text if result.content else ""
 
     async with state.db_lock:
-        _db_set_authenticated(browser_id, False)
+        _db_set_browser_session(browser_id, False, "anon")
 
     return {
         "ok": True,
@@ -326,9 +391,10 @@ async def list_conversations(request: Request, response: Response) -> dict:
 
     async with state.db_lock:
         _db_ensure_browser(browser_id)
+        account_scope = _db_get_account_scope(browser_id)
         rows = state.db.execute(
-            "SELECT id, title, updated_at FROM conversations WHERE browser_id = ? ORDER BY updated_at DESC",
-            (browser_id,),
+            "SELECT id, title, updated_at FROM conversations WHERE browser_id = ? AND account_scope = ? ORDER BY updated_at DESC",
+            (browser_id, account_scope),
         ).fetchall()
 
     return {
@@ -348,10 +414,39 @@ async def create_conversation(payload: CreateConversationRequest, request: Reque
 
     async with state.db_lock:
         _db_ensure_browser(browser_id)
-        conversation_id = _db_create_conversation(browser_id, title)
+        account_scope = _db_get_account_scope(browser_id)
+        conversation_id = _db_create_conversation(browser_id, account_scope, title)
 
     return {
         "id": conversation_id,
+        "title": title,
+    }
+
+
+@app.patch("/api/conversations/{conversation_id}")
+async def update_conversation_title(
+    conversation_id: int,
+    payload: UpdateConversationTitleRequest,
+    request: Request,
+    response: Response,
+) -> dict:
+    if state.db is None:
+        raise HTTPException(status_code=503, detail="Base de dados indisponivel")
+
+    browser_id = _get_or_create_browser_id(request, response)
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="O titulo nao pode ser vazio")
+
+    async with state.db_lock:
+        account_scope = _db_get_account_scope(browser_id)
+        if not _db_conversation_exists(browser_id, account_scope, conversation_id):
+            raise HTTPException(status_code=404, detail="Conversa nao encontrada")
+        _db_update_conversation_title(conversation_id, title)
+
+    return {
+        "ok": True,
+        "conversation_id": conversation_id,
         "title": title,
     }
 
@@ -364,7 +459,8 @@ async def get_conversation_messages(conversation_id: int, request: Request, resp
     browser_id = _get_or_create_browser_id(request, response)
 
     async with state.db_lock:
-        if not _db_conversation_exists(browser_id, conversation_id):
+        account_scope = _db_get_account_scope(browser_id)
+        if not _db_conversation_exists(browser_id, account_scope, conversation_id):
             raise HTTPException(status_code=404, detail="Conversa nao encontrada")
 
         rows = state.db.execute(
@@ -402,9 +498,10 @@ async def chat(payload: ChatRequest, request: Request, response: Response) -> di
 
     async with state.db_lock:
         _db_ensure_browser(browser_id)
+        account_scope = _db_get_account_scope(browser_id)
         if conversation_id is None:
-            conversation_id = _db_create_conversation(browser_id, _infer_conversation_title(message))
-        elif not _db_conversation_exists(browser_id, conversation_id):
+            conversation_id = _db_create_conversation(browser_id, account_scope, _infer_conversation_title(message))
+        elif not _db_conversation_exists(browser_id, account_scope, conversation_id):
             raise HTTPException(status_code=404, detail="Conversa nao encontrada")
         _db_add_message(conversation_id, "user", message)
 

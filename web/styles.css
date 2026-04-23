@@ -105,6 +105,13 @@ body {
   gap: 6px;
 }
 
+.conversation-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
 .conversation-item {
   width: 100%;
   text-align: left;
@@ -119,6 +126,15 @@ body {
 .conversation-item.active {
   border-color: #9abcf4;
   background: #ecf4ff;
+}
+
+.conversation-rename-btn {
+  border: 1px solid var(--border);
+  background: #fffaf0;
+  color: var(--ink);
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 0.8rem;
 }
 
 .login-form {

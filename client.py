@@ -65,6 +65,7 @@ SOURCE_URLS = {
     "profile": "https://sigarra.up.pt/feup/pt/mob_fest_geral.percurso_academico",
     "grades": "https://sigarra.up.pt/feup/pt/mob_fest_geral.percurso_academico",
     "enrollments": "https://sigarra.up.pt/feup/pt/mob_fest_geral.ucurr_inscricoes_corrente",
+    "current_account": "https://sigarra.up.pt/feup/pt/gpag_ccorrente_geral.conta_corrente_view",
 }
 COURSE_INFO_VIEW_URL = "https://sigarra.up.pt/feup/pt/ucurr_geral.ficha_uc_view"
 SOURCE_URLS_BY_CONTEXT = {
@@ -73,14 +74,15 @@ SOURCE_URLS_BY_CONTEXT = {
     "perfil": SOURCE_URLS["profile"],
     "notas": SOURCE_URLS["grades"],
     "inscrições": SOURCE_URLS["enrollments"],
+    "conta corrente": SOURCE_URLS["current_account"],
     "uc": SOURCE_URLS["course"],
     "parques": SOURCE_URLS["parking"],
     "cantina": SOURCE_URLS["canteen"],
     "calendário": SOURCE_URLS["calendar"],
     "docentes": SOURCE_URLS["teacher"],
 }
-AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments"}
-AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições"}
+AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments", "current_account"}
+AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições", "conta corrente"}
 
 _conversation_context = {"type": None, "data": None}
 
@@ -135,6 +137,36 @@ def _append_query_params(url: str, params: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 
+def _detect_response_language(question: str) -> str:
+    """Deteta rapidamente se a pergunta foi escrita em ingles ou portugues."""
+    q = question.lower().strip()
+    if not q:
+        return "pt"
+
+    portuguese_markers = {
+        "horário", "horario", "calendário", "cantina", "estacionamento", "docente",
+        "inscrições", "inscricoes", "cadeira", "disciplina", "feriado", "época",
+        "meu", "minha", "quero", "qual", "quando", "onde", "como", "obrigado",
+    }
+    english_markers = {
+        "schedule", "calendar", "canteen", "parking", "teacher", "course",
+        "grade", "grades", "enrollment", "enrollments", "what", "when", "where",
+        "how", "please", "thanks", "my", "i", "can", "could", "would",
+    }
+
+    words = {w for w in re.findall(r"[a-zA-Z]+", q) if w}
+    if not words:
+        return "pt"
+
+    pt_score = sum(1 for w in words if w in portuguese_markers)
+    en_score = sum(1 for w in words if w in english_markers)
+
+    if re.search(r"[áàâãéêíóôõúç]", q):
+        pt_score += 2
+
+    return "en" if en_score > pt_score else "pt"
+
+
 async def _get_student_code(session: ClientSession, is_authenticated: bool) -> str | None:
     if not is_authenticated:
         return None
@@ -149,7 +181,19 @@ async def _get_student_code(session: ClientSession, is_authenticated: bool) -> s
 
 def _choose_source_url(intents: dict, context_type: str | None, student_code: str | None) -> str:
     """Escolhe uma única URL de confirmação com prioridade por intenção."""
-    priority = ["teacher", "course", "schedule", "exams", "profile", "grades", "enrollments", "canteen", "parking", "calendar"]
+    priority = [
+        "teacher",
+        "course",
+        "schedule",
+        "exams",
+        "profile",
+        "grades",
+        "enrollments",
+        "current_account",
+        "canteen",
+        "parking",
+        "calendar",
+    ]
     chosen_intent = None
 
     for key in priority:
@@ -159,12 +203,16 @@ def _choose_source_url(intents: dict, context_type: str | None, student_code: st
 
     if chosen_intent:
         base_url = SOURCE_URLS[chosen_intent]
+        if student_code and chosen_intent == "current_account":
+            return _append_query_params(base_url, {"pct_cod": student_code})
         if student_code and chosen_intent in AUTH_INTENTS:
             return _append_query_params(base_url, {"pv_codigo": student_code})
         return base_url
 
     if context_type:
         base_url = SOURCE_URLS_BY_CONTEXT.get(context_type, DEFAULT_SOURCE_URL)
+        if student_code and context_type == "conta corrente":
+            return _append_query_params(base_url, {"pct_cod": student_code})
         if student_code and context_type in AUTH_CONTEXT_LABELS:
             return _append_query_params(base_url, {"pv_codigo": student_code})
         return base_url
@@ -195,6 +243,7 @@ async def _call_auth_tool(session: ClientSession, tool_name: str, context_label:
 
 async def ask(question: str, session: ClientSession, is_authenticated: bool = False, verbose: bool = True) -> str:
     global _conversation_context
+    current_account_summary = ""
     
     if verbose:
         tools_result = await session.list_tools()
@@ -218,6 +267,23 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         "profile": any(kw in question_lower for kw in ["meu perfil", "meus dados", "meu curso", "meu número","média","media"]),
         "grades": any(kw in question_lower for kw in ["minhas notas", "minha nota", "nota", "notas"]),
         "enrollments": any(kw in question_lower for kw in ["minhas inscrições", "inscrições", "inscritos", "uc inscritas"]),
+        "current_account": any(
+            kw in question_lower
+            for kw in [
+                "conta corrente",
+                "saldo vencido",
+                "saldo em divida",
+                "saldo em dívida",
+                "divida",
+                "dívida",
+                "devo",
+                "quanto devo",
+                "debt",
+                "overdue",
+                "outstanding balance",
+                "current account",
+            ]
+        ),
     }
     has_new_intent = any(intents.values())
     intents["follow_up"] = _is_follow_up_question(question_lower, has_new_intent) and _conversation_context["type"]
@@ -242,6 +308,12 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         context_parts.append(await _call_auth_tool(session, "get_my_grades", "notas", is_authenticated, verbose))
     if intents["enrollments"]:
         context_parts.append(await _call_auth_tool(session, "get_my_enrollments", "inscrições", is_authenticated, verbose))
+    if intents["current_account"]:
+        account_block = await _call_auth_tool(session, "get_my_current_account", "conta corrente", is_authenticated, verbose)
+        context_parts.append(account_block)
+        marker = "\nDados (conta corrente):\n"
+        if marker in account_block:
+            current_account_summary = account_block.split(marker, 1)[1].strip()
 
     # 4. Execução das Ferramentas Públicas
     if intents["teacher"]:
@@ -316,9 +388,13 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         source_url = source_url_override
 
     # 5. Comunicação com a API (LLM)
+    response_language = _detect_response_language(question)
+    language_instruction = (
+        "Answer in English only." if response_language == "en" else "Responde em português europeu."
+    )
     enriched_message = (
         f"""{chr(10).join(context_parts)}\n\nPergunta do utilizador: {question}\nResponde com base nos dados fornecidos."""
-        " Não incluas URLs na resposta."
+        f" {language_instruction} Não incluas URLs na resposta."
     )
     
     if verbose: print("Resposta: ", end="", flush=True)
@@ -333,16 +409,24 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
                     return f"Erro HTTP {response.status_code} na API do LLM."
                 
                 full_response = ""
+                token_received = False
                 async for chunk in response.aiter_text():
                     for line in filter(None, chunk.split("\n")):
                         try:
                             data = json.loads(line)
                             if data.get("type") == "token":
+                                token_received = True
                                 full_response += data.get("content", "")
                                 if verbose: print(data.get("content", ""), end="", flush=True)
                         except json.JSONDecodeError:
                             pass
-                answer = full_response.strip() or "Sem resposta do LLM."
+
+                answer = full_response.strip()
+                if not answer:
+                    answer = current_account_summary or "Sem resposta do LLM."
+                    if verbose and not token_received:
+                        print(answer, end="", flush=True)
+
                 answer_with_source = f"{answer}\n\nFonte: {source_url}"
                 if verbose:
                     print(f"\n\nFonte: {source_url}")

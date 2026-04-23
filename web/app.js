@@ -56,6 +56,9 @@ function renderConversations(conversations) {
   }
 
   conversations.forEach((conversation) => {
+    const row = document.createElement("div");
+    row.className = "conversation-row";
+
     const item = document.createElement("button");
     item.type = "button";
     item.className = "conversation-item";
@@ -66,13 +69,67 @@ function renderConversations(conversations) {
     item.addEventListener("click", () => {
       loadConversation(conversation.id);
     });
-    conversationListEl.appendChild(item);
+
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "conversation-rename-btn";
+    renameBtn.textContent = "Editar";
+    renameBtn.title = "Alterar titulo da conversa";
+    renameBtn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await renameConversation(conversation.id, conversation.title);
+    });
+
+    row.appendChild(item);
+    row.appendChild(renameBtn);
+    conversationListEl.appendChild(row);
   });
+}
+
+async function renameConversation(conversationId, currentTitle) {
+  const proposedTitle = window.prompt("Novo titulo da conversa:", currentTitle || "");
+  if (proposedTitle === null) return;
+
+  const title = proposedTitle.trim();
+  if (!title) {
+    appendMessage("assistant", "O titulo nao pode ser vazio.");
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (_) {
+      data = {};
+    }
+
+    if (!response.ok) {
+      if (response.status === 404 && data.detail === "Not Found") {
+        appendMessage(
+          "assistant",
+          "O servidor ainda nao tem a rota de edicao. Reinicia o web_app.py e atualiza a pagina (Ctrl+F5)."
+        );
+        return;
+      }
+      appendMessage("assistant", data.detail || "Erro ao alterar o titulo.");
+      return;
+    }
+
+    await refreshConversations();
+  } catch (_) {
+    appendMessage("assistant", "Erro de rede ao alterar o titulo.");
+  }
 }
 
 async function refreshConversations() {
   try {
-    const response = await fetch("/api/conversations");
+    const response = await fetch("/api/conversations", { cache: "no-store" });
     const data = await response.json();
     const conversations = data.conversations || [];
 
@@ -106,7 +163,7 @@ async function createConversation(title = "Nova conversa") {
 async function loadConversation(conversationId, updateList = true) {
   try {
     currentConversationId = conversationId;
-    const response = await fetch(`/api/conversations/${conversationId}/messages`);
+    const response = await fetch(`/api/conversations/${conversationId}/messages`, { cache: "no-store" });
     const data = await response.json();
     clearMessages();
 
@@ -121,7 +178,7 @@ async function loadConversation(conversationId, updateList = true) {
     if (updateList) {
       await refreshConversations();
     } else {
-      const listResponse = await fetch("/api/conversations");
+      const listResponse = await fetch("/api/conversations", { cache: "no-store" });
       const listData = await listResponse.json();
       renderConversations(listData.conversations || []);
     }
@@ -175,11 +232,24 @@ async function sendMessage() {
 
 async function refreshSessionStatus() {
   try {
-    const response = await fetch("/api/session");
+    const response = await fetch("/api/session", { cache: "no-store" });
     const data = await response.json();
     sessionStatusEl.textContent = data.status || "Sem informacao de sessao.";
   } catch (_) {
     sessionStatusEl.textContent = "Nao foi possivel obter o estado da sessao.";
+  }
+}
+
+async function refreshUiAfterAuthChange() {
+  currentConversationId = null;
+  clearMessages();
+  await refreshConversations();
+
+  if (currentConversationId === null) {
+    appendMessage(
+      "assistant",
+      "Sessao atualizada. Escolhe uma conversa ou cria uma nova."
+    );
   }
 }
 
@@ -208,6 +278,7 @@ loginForm.addEventListener("submit", async (event) => {
     const data = await response.json();
     if (data.ok) {
       appendMessage("assistant", data.message || "Login realizado com sucesso.");
+      await refreshUiAfterAuthChange();
     } else {
       loginErrorEl.textContent = data.message || "Erro desconhecido.";
       loginErrorEl.style.display = "block";
@@ -224,6 +295,7 @@ logoutBtn.addEventListener("click", async () => {
     const response = await fetch("/api/logout", { method: "POST" });
     const data = await response.json();
     appendMessage("assistant", data.message || "Sessao terminada.");
+    await refreshUiAfterAuthChange();
     await refreshSessionStatus();
   } catch (_) {
     appendMessage("assistant", "Erro ao terminar sessao.");
