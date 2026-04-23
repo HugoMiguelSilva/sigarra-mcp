@@ -49,11 +49,57 @@ SOURCE_URLS_BY_CONTEXT = {
     "notas": SOURCE_URLS["grades"],
     "inscrições": SOURCE_URLS["enrollments"],
     "uc": SOURCE_URLS["course"],
+    "parques": SOURCE_URLS["parking"],
+    "cantina": SOURCE_URLS["canteen"],
+    "calendário": SOURCE_URLS["calendar"],
+    "docentes": SOURCE_URLS["teacher"],
 }
 AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments"}
 AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições"}
 
 _conversation_context = {"type": None, "data": None}
+
+
+def _is_follow_up_question(question_lower: str, has_new_intent: bool) -> bool:
+    """Deteta follow-up anafórico curto (ex.: "e o p3?") e evita confundir com tema novo."""
+    if has_new_intent:
+        return False
+
+    cleaned = re.sub(r"\s+", " ", question_lower).strip(" .?!,;:")
+    if not cleaned:
+        return False
+
+    explicit_patterns = [
+        r"\bqual delas\b",
+        r"\bqual é\b",
+        r"\bquais\b",
+        r"\bquantas\b",
+        r"\bquantos\b",
+        r"\bmostra\b",
+        r"\bqual tem\b",
+        r"\bmaior\b",
+    ]
+    if any(re.search(pattern, cleaned) for pattern in explicit_patterns):
+        return True
+
+    if not re.match(r"^e\b", cleaned):
+        return False
+
+    # Follow-up com "e ..." deve ser curto e com referência ao contexto anterior.
+    tokens = cleaned.split()
+    if len(tokens) > 5:
+        return False
+
+    short_reference_patterns = [
+        r"^e\s+(o|a|os|as)\b",
+        r"^e\s+(no|na|nos|nas|do|da|dos|das)\b",
+        r"^e\s+p\d+\b",
+        r"^e\s+qual\b",
+        r"^e\s+quais\b",
+        r"^e\s+quantos\b",
+        r"^e\s+quantas\b",
+    ]
+    return any(re.search(pattern, cleaned) for pattern in short_reference_patterns)
 
 
 def _append_query_params(url: str, params: dict[str, str]) -> str:
@@ -144,11 +190,12 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         "parking": any(kw in question_lower for kw in ["parque", "estacionamento", "parking", "lugares"]),
         "schedule": any(kw in question_lower for kw in ["horário", "horario", "aulas", "meu horário"]),
         "exams": any(kw in question_lower for kw in ["meus exames", "exames inscritos", "quando tenho exame", "minha prova"]),
-        "profile": any(kw in question_lower for kw in ["meu perfil", "meus dados", "meu curso", "meu número"]),
-        "grades": any(kw in question_lower for kw in ["minhas notas", "minha nota", "nota", "notas", "média"]),
+        "profile": any(kw in question_lower for kw in ["meu perfil", "meus dados", "meu curso", "meu número","média","media"]),
+        "grades": any(kw in question_lower for kw in ["minhas notas", "minha nota", "nota", "notas"]),
         "enrollments": any(kw in question_lower for kw in ["minhas inscrições", "inscrições", "inscritos", "uc inscritas"]),
-        "follow_up": any(kw in question_lower for kw in ["qual delas", "qual é", "quantas", "quais", "mostra", "qual tem", "maior"]) and _conversation_context["type"]
     }
+    has_new_intent = any(intents.values())
+    intents["follow_up"] = _is_follow_up_question(question_lower, has_new_intent) and _conversation_context["type"]
     source_url_override = None
 
     # 2. Processamento do Follow-Up
@@ -217,13 +264,17 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
     if intents["canteen"]:
         if verbose: print("  [MCP] A obter cantina...", end=" ", flush=True)
         res = await session.call_tool("get_canteen_menu", arguments={})
-        context_parts.append(f"\nCantinas:\n{res.content[0].text if res.content else ''}")
+        data = res.content[0].text if res.content else ""
+        context_parts.append(f"\nCantinas:\n{data}")
+        _conversation_context = {"type": "cantina", "data": data}
         if verbose: print("OK")
 
     if intents["parking"]:
         if verbose: print("  [MCP] A obter parques...", end=" ", flush=True)
         res = await session.call_tool("get_parking_status", arguments={})
-        context_parts.append(f"\nParques:\n{res.content[0].text if res.content else ''}")
+        data = res.content[0].text if res.content else ""
+        context_parts.append(f"\nParques:\n{data}")
+        _conversation_context = {"type": "parques", "data": data}
         if verbose: print("OK")
 
     if intents["calendar"]:
@@ -231,6 +282,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         res = await session.call_tool("get_academic_calendar", arguments={})
         data = res.content[0].text if res.content else ""
         context_parts.append(f"\nCalendário escolar:\n{data[:8000]}")
+        _conversation_context = {"type": "calendário", "data": data}
         if verbose: print("OK")
 
     student_code = await _get_student_code(session, is_authenticated)
