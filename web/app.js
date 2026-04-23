@@ -8,8 +8,17 @@ const messageInput = document.getElementById("message-input");
 const sendBtn = document.getElementById("send-btn");
 const sessionStatusEl = document.getElementById("session-status");
 const conversationListEl = document.getElementById("conversation-list");
+const loginErrorEl = document.getElementById("login-error");
 
 let currentConversationId = null;
+
+// Add event listener for Enter key on message input
+messageInput.addEventListener('keydown', function(event) {
+  if (event.key === 'Enter'  && !event.shiftKey) {
+    event.preventDefault();
+    sendMessage();
+  }
+});
 
 function clearMessages() {
   messagesEl.innerHTML = "";
@@ -126,19 +135,7 @@ function setSending(isSending) {
   sendBtn.textContent = isSending ? "A enviar..." : "Enviar";
 }
 
-async function refreshSessionStatus() {
-  try {
-    const response = await fetch("/api/session");
-    const data = await response.json();
-    sessionStatusEl.textContent = data.status || "Sem informacao de sessao.";
-  } catch (_) {
-    sessionStatusEl.textContent = "Nao foi possivel obter o estado da sessao.";
-  }
-}
-
-chatForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
+async function sendMessage() {
   const message = messageInput.value.trim();
   if (!message) return;
 
@@ -174,10 +171,29 @@ chatForm.addEventListener("submit", async (event) => {
   } finally {
     setSending(false);
   }
+}
+
+async function refreshSessionStatus() {
+  try {
+    const response = await fetch("/api/session");
+    const data = await response.json();
+    sessionStatusEl.textContent = data.status || "Sem informacao de sessao.";
+  } catch (_) {
+    sessionStatusEl.textContent = "Nao foi possivel obter o estado da sessao.";
+  }
+}
+
+chatForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await sendMessage();
 });
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+
+  // Clear previous error
+  loginErrorEl.textContent = "";
+  loginErrorEl.style.display = "none";
 
   const username = document.getElementById("username").value.trim();
   const password = document.getElementById("password").value;
@@ -190,10 +206,16 @@ loginForm.addEventListener("submit", async (event) => {
     });
 
     const data = await response.json();
-    appendMessage("assistant", data.message || "Sem resposta de login.");
+    if (data.ok) {
+      appendMessage("assistant", data.message || "Login realizado com sucesso.");
+    } else {
+      loginErrorEl.textContent = data.message || "Erro desconhecido.";
+      loginErrorEl.style.display = "block";
+    }
     await refreshSessionStatus();
   } catch (_) {
-    appendMessage("assistant", "Erro ao efetuar login.");
+    loginErrorEl.textContent = "Erro ao efetuar login.";
+    loginErrorEl.style.display = "block";
   }
 });
 

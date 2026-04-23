@@ -9,14 +9,39 @@ import os
 import re
 import sys
 import uuid
-from getpass import getpass
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
+
+if os.name == 'nt':
+    import msvcrt
+else:
+    from getpass import getpass
 
 import httpx
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+def get_password(prompt="Password: "):
+    if os.name == 'nt':
+        print(prompt, end="", flush=True)
+        password = ""
+        while True:
+            char = msvcrt.getch()
+            if char == b'\r' or char == b'\n':
+                print()
+                break
+            elif char == b'\b':
+                if password:
+                    password = password[:-1]
+                    print('\b \b', end="", flush=True)
+            else:
+                password += char.decode('utf-8', errors='ignore')
+                print('*', end="", flush=True)
+        return password
+    else:
+        from getpass import getpass
+        return getpass(prompt)
 
 # ---------------------------------------------------------------------------
 # Configuração
@@ -337,7 +362,7 @@ async def do_login(session: ClientSession) -> bool:
     username = input("Username (ex: up123456789) [Enter para saltar]: ").strip()
     if not username: return False
     
-    password = getpass("Password: ")
+    password = get_password("Password: ")
     if not password: return False
     
     print("\nA autenticar...", end=" ", flush=True)
