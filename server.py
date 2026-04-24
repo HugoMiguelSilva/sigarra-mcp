@@ -217,7 +217,6 @@ def _find_saldo_vencido(html: str) -> float | None:
     alerta = soup.find("div", class_="alerta")
     if alerta:
         text = alerta.get_text(strip=True)
-        # Exemplo: "Saldo vencido: 69,70 € (este valor pode não incluir o valor total de juros aplicável)"
         match = re.search(r"Saldo\s+vencido\s*:\s*(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)", text, re.IGNORECASE)
         if match:
             return _coerce_float(match.group(1))
@@ -234,7 +233,6 @@ def _find_first_payment_link(html: str) -> str | None:
     if not html:
         return None
     soup = BeautifulSoup(html, "html.parser")
-    # Procura o primeiro link na coluna "l a" que contém o ícone de pagamento
     link = soup.find("td", class_="l a")
     if link:
         a_tag = link.find("a")
@@ -251,7 +249,7 @@ def _extract_payment_info(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     info = {}
     
-    # Extrair Valor Total (na última tabela do formulário, na linha "Valor Total:")
+    # Extrair Valor Total
     valor_total_td = soup.find("td", string=re.compile(r"Valor Total\s*:", re.IGNORECASE))
     if valor_total_td:
         valor_total_row = valor_total_td.find_parent("tr")
@@ -263,7 +261,7 @@ def _extract_payment_info(html: str) -> dict:
                 if valor_match:
                     info["valor_total"] = _coerce_float(valor_match.group(1))
     
-    # Extrair dados da entidade (formulario-legenda)
+    # Extrair dados da entidade
     legenda_tds = soup.find_all("td", class_="formulario-legenda")
     for td in legenda_tds:
         texto = td.get_text(strip=True)
@@ -284,7 +282,12 @@ def _extract_payment_info(html: str) -> dict:
     
     # Extrair débitos associados
     debitos = []
-    tabela_debitos = soup.find("table", class_="formulario")
+    tabela_debitos = None
+    for table in soup.find_all("table", class_="formulario"):
+        if table.find("th", string=re.compile(r"Débito Associado", re.IGNORECASE)):
+            tabela_debitos = table
+            break
+    
     if tabela_debitos:
         rows = tabela_debitos.find_all("tr")
         for row in rows:
@@ -298,8 +301,8 @@ def _extract_payment_info(html: str) -> dict:
                 if descricao and "Débito Associado" not in descricao and "Valor" not in descricao:
                     debito = {
                         "descricao": descricao,
-                        "valor": valor.replace("&nbsp;", " "),
-                        "juro": juro.replace("&nbsp;", " ") if juro else None,
+                        "valor": valor.replace("\xa0", " "),
+                        "juro": juro.replace("\xa0", " ") if juro else None,
                         "data_limite": data_limite if data_limite else None
                     }
                     debitos.append(debito)
@@ -308,6 +311,74 @@ def _extract_payment_info(html: str) -> dict:
         info["debitos"] = debitos
     
     return info
+
+
+def _extract_csrf_token(html: str) -> str | None:
+    """Extrai o token CSRF de uma página Django."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    csrf_input = soup.find("input", {"name": "csrfmiddlewaretoken"})
+    if csrf_input and csrf_input.get("value"):
+        return csrf_input["value"]
+    return None
+
+
+def _extract_mb_data(html: str) -> dict | None:
+    """Extrai Entidade, Referência e Valor da página de confirmação Multibanco."""
+    if not html:
+        return None
+    
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n", strip=True)
+    
+    info = {}
+    
+    # Padrões para dados MB
+    entidade_patterns = [
+        r'Entidade\s*:?\s*(\d{4,6})',
+        r'Entity\s*:?\s*(\d{4,6})',
+    ]
+    referencia_patterns = [
+        r'Referência\s*:?\s*(\d{9,15})',
+        r'Reference\s*:?\s*(\d{9,15})',
+    ]
+    valor_patterns = [
+        r'(?:Valor|Montante|Amount)\s*:?\s*(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)\s*(?:€|EUR)?',
+    ]
+    
+    for pattern in entidade_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            info["entidade"] = match.group(1)
+            break
+    
+    for pattern in referencia_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            info["referencia"] = match.group(1)
+            break
+    
+    for pattern in valor_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            info["valor"] = match.group(1).strip()
+            break
+    
+    # Se não encontrou, procura em elementos específicos
+    if not info:
+        for elem in soup.find_all(["span", "div", "td", "p", "li"]):
+            elem_text = elem.get_text(strip=True)
+            if "entidade" in elem_text.lower() and "entidade" not in info:
+                nums = re.findall(r'\d{4,6}', elem_text)
+                if nums:
+                    info["entidade"] = nums[0]
+            if ("referência" in elem_text.lower() or "referencia" in elem_text.lower()) and "referencia" not in info:
+                nums = re.findall(r'\d{9,15}', elem_text)
+                if nums:
+                    info["referencia"] = nums[0]
+    
+    return info if info else None
 
 
 # ---------------------------------------------------------------------------
@@ -672,52 +743,184 @@ async def get_payment_info() -> str:
         return "Precisas de estar autenticado para obter informações de pagamento."
     
     try:
-        # 1. Obter a página da conta corrente
         html = await _make_auth_request_text(CURRENT_ACCOUNT_URL, {"pct_cod": str(_session.codigo)})
         
-        # 2. Encontrar o primeiro link de pagamento
         payment_link = _find_first_payment_link(html)
         if not payment_link:
             return "Não foram encontrados débitos pendentes para pagamento."
         
-        # 3. Seguir o link para a página de pagamento
         async with httpx.AsyncClient(timeout=20, follow_redirects=True, cookies=_session.cookies) as client:
             response = await client.get(payment_link, headers=HEADERS)
             response.raise_for_status()
             payment_html = response.text
         
-        # 4. Extrair informações de pagamento
         payment_info = _extract_payment_info(payment_html)
         
         if not payment_info:
             return "Não foi possível extrair as informações de pagamento."
         
-        # 5. Formatar resposta
         lines = ["📋 Informações de Pagamento:"]
         
         if "cliente" in payment_info:
-            lines.append(f"Cliente: {payment_info['cliente']}")
+            lines.append(f"👤 Cliente: {payment_info['cliente']}")
         if "nif" in payment_info:
-            lines.append(f"NIF: {payment_info['nif']}")
+            lines.append(f"📄 NIF: {payment_info['nif']}")
         if "valor_total" in payment_info:
-            lines.append(f"Valor Total a Pagar: {payment_info['valor_total']:.2f} EUR")
+            lines.append(f"💰 Valor Total a Pagar: {payment_info['valor_total']:.2f} EUR")
         
         if "debitos" in payment_info:
-            lines.append("\nDébitos associados:")
+            lines.append("\n📌 Débitos associados:")
             for debito in payment_info["debitos"]:
                 linha = f"  • {debito['descricao']}: {debito['valor']}"
-                if debito.get("juro"):
-                    linha += f" (Juro: {debito['juro']})"
+                if debito.get("juro") and debito["juro"].strip():
+                    linha += f" (Juro: {debito['juro'].strip()})"
                 if debito.get("data_limite"):
                     linha += f" - Data Limite: {debito['data_limite']}"
                 lines.append(linha)
         
-        lines.append(f"\n🔗 Link para pagamento: {payment_link}")
+        lines.append(f"\n🔗 Para efetuar o pagamento, acede a: {payment_link}")
+        lines.append("💡 Dica: Usa o comando 'gerar referência multibanco' para obteres os dados de pagamento.")
         
         return "\n".join(lines)
         
     except Exception as exc:
         return f"Erro ao obter informações de pagamento: {exc}"
+
+
+@mcp.tool()
+async def get_multibanco_reference() -> str:
+    """Gera uma referência Multibanco para pagamento do débito mais antigo em atraso.
+    
+    Fluxo:
+    1. Obtém a página da conta corrente
+    2. Encontra o primeiro link de pagamento (débito mais antigo)
+    3. Submete o formulário de pagamento
+    4. Na página de gateway, seleciona "Referência Multibanco"
+    5. Submete o formulário para gerar a referência
+    6. Extrai e devolve Entidade, Referência e Valor
+    """
+    if not _session.authenticated:
+        return "Precisas de estar autenticado para gerar uma referência Multibanco."
+    
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, cookies=_session.cookies) as client:
+            # 1. Obter a página da conta corrente
+            cc_response = await client.get(
+                CURRENT_ACCOUNT_URL,
+                params={"pct_cod": str(_session.codigo)},
+                headers=HEADERS
+            )
+            cc_response.raise_for_status()
+            
+            # 2. Encontrar o primeiro link de pagamento
+            payment_link = _find_first_payment_link(cc_response.text)
+            if not payment_link:
+                return "Não foram encontrados débitos pendentes para pagamento."
+            
+            # 3. GET à página de pagamento do SIGARRA
+            payment_response = await client.get(payment_link, headers=HEADERS)
+            payment_response.raise_for_status()
+            payment_html = payment_response.text
+            
+            # 4. Extrair informações do formulário e submeter
+            soup = BeautifulSoup(payment_html, "html.parser")
+            form = soup.find("form", {"id": "form_mb"})
+            
+            if not form:
+                return "Não foi possível encontrar o formulário de pagamento."
+            
+            # Construir dados do formulário
+            form_data = {}
+            for input_tag in form.find_all("input"):
+                name = input_tag.get("name")
+                value = input_tag.get("value", "")
+                if name:
+                    form_data[name] = value
+            
+            # Submeter o formulário de pagamento
+            form_action = form.get("action", "")
+            if not form_action.startswith("http"):
+                form_action = urljoin(BASE_URL, form_action) if form_action else str(payment_response.url)
+            else:
+                form_action = str(payment_response.url)
+            
+            submit_response = await client.post(
+                form_action,
+                data=form_data,
+                headers={
+                    **HEADERS,
+                    "Referer": str(payment_response.url),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                }
+            )
+            submit_response.raise_for_status()
+            gateway_html = submit_response.text
+            
+            # 5. Agora estamos na página de gateway de pagamento
+            csrf_token = _extract_csrf_token(gateway_html)
+            
+            if not csrf_token:
+                # Tentar extrair dados diretamente se já estiver na página de resultado
+                mb_data = _extract_mb_data(gateway_html)
+                if mb_data:
+                    lines = ["🏦 Referência Multibanco gerada com sucesso!"]
+                    if "entidade" in mb_data:
+                        lines.append(f"📋 Entidade: {mb_data['entidade']}")
+                    if "referencia" in mb_data:
+                        lines.append(f"🔢 Referência: {mb_data['referencia']}")
+                    if "valor" in mb_data:
+                        lines.append(f"💰 Valor: {mb_data['valor']} €")
+                    return "\n".join(lines)
+                
+                return "Não foi possível obter o token CSRF da página de pagamento. Tenta novamente."
+            
+            # Construir o POST para gerar referência Multibanco
+            base_gateway_url = str(submit_response.url)
+            
+            mbref_data = {
+                "csrfmiddlewaretoken": csrf_token,
+                "mbref": "True",
+            }
+            
+            # Submeter o pedido de referência Multibanco
+            mbref_response = await client.post(
+                base_gateway_url,
+                data=mbref_data,
+                headers={
+                    **HEADERS,
+                    "Referer": base_gateway_url,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-CSRFToken": csrf_token,
+                }
+            )
+            mbref_response.raise_for_status()
+            mbref_html = mbref_response.text
+            
+            # 6. Extrair dados MB da resposta
+            mb_data = _extract_mb_data(mbref_html)
+            
+            if mb_data:
+                lines = ["🏦 Referência Multibanco gerada com sucesso!"]
+                if "entidade" in mb_data:
+                    lines.append(f"📋 Entidade: {mb_data['entidade']}")
+                if "referencia" in mb_data:
+                    lines.append(f"🔢 Referência: {mb_data['referencia']}")
+                if "valor" in mb_data:
+                    lines.append(f"💰 Valor: {mb_data['valor']} €")
+                lines.append("\n⚠️ Prazo: A referência é válida até à data limite indicada na página de pagamento.")
+                return "\n".join(lines)
+            
+            # Se não conseguiu extrair, devolve o texto visível da página
+            soup_result = BeautifulSoup(mbref_html, "html.parser")
+            visible_text = soup_result.get_text(separator="\n", strip=True)
+            
+            if len(visible_text) > 1500:
+                visible_text = visible_text[:1500] + "\n[... texto truncado ...]"
+            
+            return f"Dados da página de resposta:\n\n{visible_text}"
+            
+    except Exception as exc:
+        return f"Erro ao gerar referência Multibanco: {exc}"
 
 
 if __name__ == "__main__":

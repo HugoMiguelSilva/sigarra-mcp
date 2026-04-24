@@ -123,7 +123,6 @@ def _is_follow_up_question(question_lower: str, has_new_intent: bool) -> bool:
     if not re.match(r"^e\b", cleaned):
         return False
 
-    # Follow-up com "e ..." deve ser curto e com referência ao contexto anterior.
     tokens = cleaned.split()
     if len(tokens) > 5:
         return False
@@ -158,6 +157,7 @@ def _detect_response_language(question: str) -> str:
         "horário", "horario", "calendário", "cantina", "estacionamento", "docente",
         "inscrições", "inscricoes", "cadeira", "disciplina", "feriado", "época",
         "meu", "minha", "quero", "qual", "quando", "onde", "como", "obrigado",
+        "referência", "referencia", "multibanco", "entidade", "pagamento",
     }
     english_markers = {
         "schedule", "calendar", "canteen", "parking", "teacher", "course",
@@ -340,6 +340,15 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
                 "regularizar",
                 "saldar",
                 "pagar em atraso",
+                "referência multibanco",
+                "referencia multibanco",
+                "referência mb",
+                "referencia mb",
+                "gerar referência",
+                "gerar referencia",
+                "dados para pagamento",
+                "entidade e referência",
+                "entidade e referencia",
             ]
         ),
     }
@@ -357,10 +366,19 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
 
     # 3. Execução das Ferramentas Privadas
     if intents["payment"]:
+        # Verificar se é para gerar referência MB ou só info de pagamento
+        is_mb_request = any(kw in question_lower for kw in [
+            "referência multibanco", "referencia multibanco", "referência mb", "referencia mb",
+            "gerar referência", "gerar referencia", "entidade e referência", "entidade e referencia",
+            "dados para pagamento",
+        ])
+        
+        tool_to_call = "get_multibanco_reference" if is_mb_request else "get_payment_info"
+        
         context_parts.append(
             await _call_auth_tool(
                 session,
-                "get_payment_info",
+                tool_to_call,
                 "pagamento",
                 is_authenticated,
                 verbose,
