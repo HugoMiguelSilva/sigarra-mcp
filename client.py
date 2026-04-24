@@ -67,6 +67,7 @@ SOURCE_URLS = {
     "grades": "https://sigarra.up.pt/feup/pt/mob_fest_geral.percurso_academico",
     "enrollments": "https://sigarra.up.pt/feup/pt/mob_fest_geral.ucurr_inscricoes_corrente",
     "current_account": "https://sigarra.up.pt/feup/pt/gpag_ccorrente_geral.conta_corrente_view",
+    "payment": "https://sigarra.up.pt/feup/pt/gpag_ccorrente_geral.mb",
 }
 COURSE_INFO_VIEW_URL = "https://sigarra.up.pt/feup/pt/ucurr_geral.ficha_uc_view"
 SOURCE_URLS_BY_CONTEXT = {
@@ -76,14 +77,15 @@ SOURCE_URLS_BY_CONTEXT = {
     "notas": SOURCE_URLS["grades"],
     "inscrições": SOURCE_URLS["enrollments"],
     "conta corrente": SOURCE_URLS["current_account"],
+    "pagamento": SOURCE_URLS["payment"],
     "uc": SOURCE_URLS["course"],
     "parques": SOURCE_URLS["parking"],
     "cantina": SOURCE_URLS["canteen"],
     "calendário": SOURCE_URLS["calendar"],
     "docentes": SOURCE_URLS["teacher"],
 }
-AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments", "current_account"}
-AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições", "conta corrente"}
+AUTH_INTENTS = {"schedule", "exams", "profile", "grades", "enrollments", "current_account", "payment"}
+AUTH_CONTEXT_LABELS = {"horário", "exames", "perfil", "notas", "inscrições", "conta corrente", "pagamento"}
 
 _conversation_context = {"type": None, "data": None}
 _last_ask_meta = {"tools_used": [], "mcp_calls": 0}
@@ -204,6 +206,7 @@ def _choose_source_url(intents: dict, context_type: str | None, student_code: st
         "grades",
         "enrollments",
         "current_account",
+        "payment",
         "canteen",
         "parking",
         "calendar",
@@ -219,6 +222,8 @@ def _choose_source_url(intents: dict, context_type: str | None, student_code: st
         base_url = SOURCE_URLS[chosen_intent]
         if student_code and chosen_intent == "current_account":
             return _append_query_params(base_url, {"pct_cod": student_code})
+        if student_code and chosen_intent == "payment":
+            return _append_query_params(base_url, {"pct_cod": student_code})
         if student_code and chosen_intent in AUTH_INTENTS:
             return _append_query_params(base_url, {"pv_codigo": student_code})
         return base_url
@@ -226,6 +231,8 @@ def _choose_source_url(intents: dict, context_type: str | None, student_code: st
     if context_type:
         base_url = SOURCE_URLS_BY_CONTEXT.get(context_type, DEFAULT_SOURCE_URL)
         if student_code and context_type == "conta corrente":
+            return _append_query_params(base_url, {"pct_cod": student_code})
+        if student_code and context_type == "pagamento":
             return _append_query_params(base_url, {"pct_cod": student_code})
         if student_code and context_type in AUTH_CONTEXT_LABELS:
             return _append_query_params(base_url, {"pv_codigo": student_code})
@@ -316,6 +323,25 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
                 "valor pendente",
             ]
         ),
+        "payment": any(
+            kw in question_lower
+            for kw in [
+                "pagar",
+                "pagamento",
+                "pagar o saldo",
+                "pagar a dívida",
+                "pagar o débito",
+                "efetuar pagamento",
+                "efectuar pagamento",
+                "quero pagar",
+                "como pagar",
+                "como posso pagar",
+                "liquidar",
+                "regularizar",
+                "saldar",
+                "pagar em atraso",
+            ]
+        ),
     }
     has_new_intent = any(intents.values())
     intents["follow_up"] = _is_follow_up_question(question_lower, has_new_intent) and _conversation_context["type"]
@@ -330,6 +356,17 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
         context_parts.append(f"\n--- Contexto anterior ({_conversation_context['type']}) ---\n{ctx_data}")
 
     # 3. Execução das Ferramentas Privadas
+    if intents["payment"]:
+        context_parts.append(
+            await _call_auth_tool(
+                session,
+                "get_payment_info",
+                "pagamento",
+                is_authenticated,
+                verbose,
+                call_tool_fn=call_mcp_tool,
+            )
+        )
     if intents["schedule"]:
         context_parts.append(
             await _call_auth_tool(
