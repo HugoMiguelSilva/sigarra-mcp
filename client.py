@@ -310,6 +310,10 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
                 "overdue",
                 "outstanding balance",
                 "current account",
+                "saldo",
+                "saldo total",
+                "saldo pendente",
+                "valor pendente",
             ]
         ),
     }

@@ -196,88 +196,35 @@ def _coerce_float(value) -> float | None:
     return None
 
 
-def _find_overdue_amount(payload) -> float | None:
-    """Procura recursivamente por campos de saldo vencido/em dívida."""
-    key_patterns = [
-        "saldo_vencido",
-        "valor_vencido",
-        "vencido",
-        "em_divida",
-        "divida",
-        "debt",
-        "overdue",
-        "total_em_divida",
-    ]
+def _find_saldo_total(html: str) -> float | None:
+    """Extrai o saldo total da conta corrente (span com id 'span_saldo_total')."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    span = soup.find("span", id="span_saldo_total")
+    if span:
+        return _coerce_float(span.get_text(strip=True))
+    return None
 
-    best_value = None
 
-    def visit(node):
-        nonlocal best_value
-
-        if isinstance(node, dict):
-            for k, v in node.items():
-                key = str(k).lower()
-                if any(pattern in key for pattern in key_patterns):
-                    amount = _coerce_float(v)
-                    if amount is not None:
-                        best_value = amount
-                visit(v)
-        elif isinstance(node, list):
-            for item in node:
-                visit(item)
-
-    visit(payload)
-    return best_value
+def _find_saldo_vencido(html: str) -> float | None:
+    """Extrai o saldo vencido do div com class 'alerta'."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    alerta = soup.find("div", class_="alerta")
+    if alerta:
+        text = alerta.get_text(strip=True)
+        # Exemplo: "Saldo vencido: 69,70 € (este valor pode não incluir o valor total de juros aplicável)"
+        match = re.search(r"Saldo\s+vencido\s*:\s*(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)", text, re.IGNORECASE)
+        if match:
+            return _coerce_float(match.group(1))
+    return None
 
 
 def _find_overdue_amount_in_text(text: str) -> float | None:
-    """Extrai saldo vencido de texto HTML da conta corrente."""
-    if not text:
-        return None
-
-    soup = BeautifulSoup(text, "html.parser")
-    page_text = soup.get_text(" ", strip=True)
-    lowered = page_text.lower()
-
-    marker_patterns = [
-        r"saldo\s+vencido",
-        r"valor\s+em\s+d[ií]vida",
-        r"total\s+em\s+d[ií]vida",
-        r"em\s+d[ií]vida",
-        r"vencido",
-    ]
-    amount_pattern = r"(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)\s*(?:eur|€)?"
-
-    for marker in marker_patterns:
-        for match in re.finditer(marker, lowered):
-            start = max(0, match.start() - 40)
-            end = min(len(page_text), match.end() + 120)
-            window = page_text[start:end]
-            amount_match = re.search(amount_pattern, window, flags=re.IGNORECASE)
-            if amount_match:
-                amount = _coerce_float(amount_match.group(1))
-                if amount is not None:
-                    return amount
-
-    # Fallback: tenta detetar montantes perto de palavras-chave.
-    for kw_match in re.finditer(r"vencido|divida|dívida", lowered):
-        start = max(0, kw_match.start() - 80)
-        end = min(len(page_text), kw_match.end() + 120)
-        window = page_text[start:end]
-        amount_match = re.search(amount_pattern, window, flags=re.IGNORECASE)
-        if amount_match:
-            amount = _coerce_float(amount_match.group(1))
-            if amount is not None:
-                return amount
-
-    # Fallback final: primeiro montante plausível na página.
-    amount_match = re.search(amount_pattern, page_text, flags=re.IGNORECASE)
-    if amount_match:
-        amount = _coerce_float(amount_match.group(1))
-        if amount is not None:
-            return amount
-
-    return None
+    """Mantida para compatibilidade - delega para _find_saldo_vencido."""
+    return _find_saldo_vencido(text)
 
 
 # ---------------------------------------------------------------------------
@@ -614,20 +561,23 @@ async def get_my_grades() -> str:
 
 @mcp.tool()
 async def get_my_current_account() -> str:
-    """Obtém informação da conta corrente e destaca o saldo vencido."""
+    """Obtém informação completa da conta corrente: saldo total e saldo vencido."""
     try:
         html = await _make_auth_request_text(CURRENT_ACCOUNT_URL, {"pct_cod": str(_session.codigo)})
-        overdue = _find_overdue_amount_in_text(html)
-        if overdue is None:
-            return (
-                "Conta corrente: não foi possível identificar automaticamente o saldo vencido "
-                "na resposta do SIGARRA."
-            )
-
-        if overdue <= 0:
-            return "Conta corrente: não tens saldo vencido."
-
-        return f"Conta corrente: tens {overdue:.2f} EUR de saldo vencido."
+        
+        saldo_total = _find_saldo_total(html)
+        saldo_vencido = _find_saldo_vencido(html)
+        
+        parts = []
+        if saldo_total is not None:
+            parts.append(f"Saldo total: {saldo_total:.2f} EUR")
+        if saldo_vencido is not None:
+            parts.append(f"Saldo vencido: {saldo_vencido:.2f} EUR")
+        
+        if not parts:
+            return "Conta corrente: não foi possível identificar os valores na resposta do SIGARRA."
+        
+        return "Conta corrente:\n" + "\n".join(parts)
     except Exception as exc:
         return f"Erro ao obter conta corrente: {exc}"
 
