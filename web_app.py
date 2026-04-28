@@ -69,6 +69,7 @@ class AppState:
 
 state = AppState()
 BROWSER_COOKIE_NAME = "sigarra_ui_id"
+ADMIN_COOKIE_NAME = "admin_session"
 DB_PATH = BASE_DIR / "sigarra_ui.db"
 
 
@@ -81,6 +82,11 @@ def _extract_source_link(answer: str) -> tuple[str, str | None]:
     source_url = match.group(1)
     clean_answer = answer[: match.start()].strip()
     return clean_answer, source_url
+
+
+def _get_admin_auth_status(request: Request) -> bool:
+    """Verifica se o utilizador tem sessão admin válida."""
+    return request.cookies.get(ADMIN_COOKIE_NAME) == "authenticated"
 
 
 def _utc_now() -> str:
@@ -601,13 +607,20 @@ async def index(request: Request) -> HTMLResponse:
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_index(request: Request) -> HTMLResponse:
+async def admin_index(request: Request, response: Response) -> HTMLResponse:
+    if not _get_admin_auth_status(request):
+        # Sem autenticação, retornar página de login
+        admin_path = WEB_DIR / "admin_login.html"
+        if not admin_path.exists():
+            raise HTTPException(status_code=404, detail="Pagina de login de admin nao encontrada")
+        return HTMLResponse(admin_path.read_text(encoding="utf-8"))
+    
     admin_path = WEB_DIR / "admin.html"
     if not admin_path.exists():
         raise HTTPException(status_code=404, detail="Pagina de admin nao encontrada")
-    response = HTMLResponse(admin_path.read_text(encoding="utf-8"))
-    _get_or_create_browser_id(request, response)
-    return response
+    html_response = HTMLResponse(admin_path.read_text(encoding="utf-8"))
+    _get_or_create_browser_id(request, html_response)
+    return html_response
 
 
 @app.get("/api/session")
@@ -634,6 +647,37 @@ async def session_status(request: Request, response: Response) -> dict:
         "authenticated": real_authenticated,
         "status": status_text,
     }
+
+
+@app.post("/api/admin/login")
+async def admin_login(payload: LoginRequest, request: Request, response: Response) -> dict:
+    """Valida password de admin e cria sessão autenticada."""
+    admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
+    if not admin_password:
+        raise HTTPException(status_code=500, detail="Admin password nao configurada")
+    
+    provided_password = (payload.password or "").strip()
+    if provided_password != admin_password:
+        raise HTTPException(status_code=401, detail="Password incorreta")
+    
+    response.set_cookie(
+        key=ADMIN_COOKIE_NAME,
+        value="authenticated",
+        max_age=60 * 60 * 24,  # 24 horas
+        httponly=True,
+        samesite="lax",
+    )
+    return {"ok": True, "message": "Admin autenticado com sucesso"}
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(request: Request, response: Response) -> dict:
+    """Remove sessão de admin."""
+    response.delete_cookie(
+        key=ADMIN_COOKIE_NAME,
+        samesite="lax",
+    )
+    return {"ok": True, "message": "Admin logout bem-sucedido"}
 
 
 @app.post("/api/login")

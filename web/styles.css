@@ -201,6 +201,22 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.logout-btn {
+  background: #fee;
+  color: #c33;
+  border: 1px solid #fcc;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s, color 0.2s;
+}
+
+.logout-btn:hover {
+  background: #fdd;
+  color: #b22;
+}
+
 .chat-area {
   display: flex;
   flex-direction: column;

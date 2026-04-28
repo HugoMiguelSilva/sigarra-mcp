@@ -128,4 +128,21 @@ granularitySelect.addEventListener("change", () => {
   loadAdminStats();
 });
 
+const logoutBtn = document.getElementById("logout-admin");
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", async () => {
+    if (confirm("Tem a certeza que quer fazer logout?")) {
+      try {
+        const res = await fetch("/api/admin/logout", { method: "POST" });
+        if (res.ok) {
+          window.location.href = "/admin";
+        }
+      } catch (err) {
+        console.error("Logout error:", err);
+        alert("Erro ao fazer logout");
+      }
+    }
+  });
+}
+
 loadAdminStats();
