@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Política de Privacidade - SIGARRA Assistant</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+    <style>
+      .privacy-page {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 40px 20px 64px;
+      }
+
+      .privacy-card {
+        border: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel-2) 86%, white);
+        border-radius: 18px;
+        padding: 28px;
+        box-shadow: 0 18px 50px rgba(31, 26, 20, 0.08);
+      }
+
+      .privacy-card h1 {
+        margin: 0 0 8px;
+        font-size: 2rem;
+      }
+
+      .privacy-card p,
+      .privacy-card li {
+        color: var(--muted);
+        line-height: 1.65;
+        font-size: 1rem;
+      }
+
+      .privacy-card h2 {
+        margin-top: 24px;
+        margin-bottom: 8px;
+        font-size: 1.05rem;
+      }
+
+      .privacy-actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 24px;
+      }
+
+      .privacy-note {
+        margin-top: 18px;
+        padding: 12px 14px;
+        border-left: 4px solid var(--accent);
+        background: #f7f1e2;
+        border-radius: 10px;
+      }
+
+      .privacy-card ul {
+        margin: 8px 0 0;
+        padding-left: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="privacy-page">
+      <article class="privacy-card">
+        <h1>Política de Privacidade</h1>
+        <p>
+          Esta interface foi criada para consultar informação do SIGARRA e manter o histórico de conversa.
+          O objetivo desta página é explicar, de forma simples, que dados são tratados e para que servem.
+        </p>
+
+        <h2>Dados que a aplicação trata</h2>
+        <ul>
+          <li>Mensagem que o utilizador escreve na conversa.</li>
+          <li>Respostas geradas pelo sistema e respetivas fontes.</li>
+          <li>Identificador técnico do browser para manter a sessão.</li>
+          <li>Informação de autenticação SIGARRA apenas durante a sessão ativa.</li>
+          <li>Métricas de utilização, como tempo de resposta e feedback dado às respostas.</li>
+        </ul>
+
+        <h2>O que não é guardado</h2>
+        <ul>
+          <li>Passwords SIGARRA em texto simples na base de dados.</li>
+          <li>Dados desnecessários para o funcionamento do assistente.</li>
+          <li>Informação pessoal fora do contexto de utilização do assistente.</li>
+        </ul>
+
+        <h2>Finalidades do tratamento</h2>
+        <ul>
+          <li>Responder às perguntas do utilizador.</li>
+          <li>Manter conversas separadas por conta autenticada.</li>
+          <li>Melhorar a qualidade das respostas e a manutenção técnica.</li>
+          <li>Produzir métricas internas de uso e desempenho.</li>
+        </ul>
+
+        <h2>Base de funcionamento</h2>
+        <p>
+          O sistema precisa de tratar estes dados para prestar o serviço, manter a sessão e mostrar o histórico.
+          O acesso administrativo está protegido por password.
+        </p>
+
+        <div class="privacy-note">
+          Se este projeto for usado numa publicação oficial, recomenda-se validação final com a instituição
+          responsável antes de disponibilizar ao público.
+        </div>
+
+        <div class="privacy-actions">
+          <a class="ghost-btn" href="/">Voltar ao chat</a>
+          <a class="ghost-btn" href="/admin">Ir para admin</a>
+        </div>
+      </article>
+    </main>
+  </body>
+</html>

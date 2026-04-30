@@ -9,7 +9,6 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -36,7 +35,6 @@ STUDENT_PROFILE_URL = f"{BASE_URL}/mob_fest_geral.perfil"
 MY_PROFILE_URL = f"{BASE_URL}/mob_fest_geral.percurso_academico"
 ENROLLMENTS_URL = f"{BASE_URL}/mob_fest_geral.ucurr_inscricoes_corrente"
 CURRENT_ACCOUNT_URL = f"{BASE_URL}/gpag_ccorrente_geral.conta_corrente_view"
-PAYMENT_URL = f"{BASE_URL}/gpag_ccorrente_geral.mb"
 
 HEADERS = {
     "User-Agent": (
@@ -198,116 +196,88 @@ def _coerce_float(value) -> float | None:
     return None
 
 
-def _find_saldo_total(html: str) -> float | None:
-    """Extrai o saldo total da conta corrente (span com id 'span_saldo_total')."""
-    if not html:
-        return None
-    soup = BeautifulSoup(html, "html.parser")
-    span = soup.find("span", id="span_saldo_total")
-    if span:
-        return _coerce_float(span.get_text(strip=True))
-    return None
+def _find_overdue_amount(payload) -> float | None:
+    """Procura recursivamente por campos de saldo vencido/em dívida."""
+    key_patterns = [
+        "saldo_vencido",
+        "valor_vencido",
+        "vencido",
+        "em_divida",
+        "divida",
+        "debt",
+        "overdue",
+        "total_em_divida",
+    ]
 
+    best_value = None
 
-def _find_saldo_vencido(html: str) -> float | None:
-    """Extrai o saldo vencido do div com class 'alerta'."""
-    if not html:
-        return None
-    soup = BeautifulSoup(html, "html.parser")
-    alerta = soup.find("div", class_="alerta")
-    if alerta:
-        text = alerta.get_text(strip=True)
-        # Exemplo: "Saldo vencido: 69,70 € (este valor pode não incluir o valor total de juros aplicável)"
-        match = re.search(r"Saldo\s+vencido\s*:\s*(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)", text, re.IGNORECASE)
-        if match:
-            return _coerce_float(match.group(1))
-    return None
+    def visit(node):
+        nonlocal best_value
+
+        if isinstance(node, dict):
+            for k, v in node.items():
+                key = str(k).lower()
+                if any(pattern in key for pattern in key_patterns):
+                    amount = _coerce_float(v)
+                    if amount is not None:
+                        best_value = amount
+                visit(v)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(payload)
+    return best_value
 
 
 def _find_overdue_amount_in_text(text: str) -> float | None:
-    """Mantida para compatibilidade - delega para _find_saldo_vencido."""
-    return _find_saldo_vencido(text)
-
-
-def _find_first_payment_link(html: str) -> str | None:
-    """Encontra o primeiro link de pagamento na tabela de despesas não saldadas."""
-    if not html:
+    """Extrai saldo vencido de texto HTML da conta corrente."""
+    if not text:
         return None
-    soup = BeautifulSoup(html, "html.parser")
-    # Procura o primeiro link na coluna "l a" que contém o ícone de pagamento
-    link = soup.find("td", class_="l a")
-    if link:
-        a_tag = link.find("a")
-        if a_tag and a_tag.get("href"):
-            return urljoin(BASE_URL, a_tag["href"])
+
+    soup = BeautifulSoup(text, "html.parser")
+    page_text = soup.get_text(" ", strip=True)
+    lowered = page_text.lower()
+
+    marker_patterns = [
+        r"saldo\s+vencido",
+        r"valor\s+em\s+d[ií]vida",
+        r"total\s+em\s+d[ií]vida",
+        r"em\s+d[ií]vida",
+        r"vencido",
+    ]
+    amount_pattern = r"(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)\s*(?:eur|€)?"
+
+    for marker in marker_patterns:
+        for match in re.finditer(marker, lowered):
+            start = max(0, match.start() - 40)
+            end = min(len(page_text), match.end() + 120)
+            window = page_text[start:end]
+            amount_match = re.search(amount_pattern, window, flags=re.IGNORECASE)
+            if amount_match:
+                amount = _coerce_float(amount_match.group(1))
+                if amount is not None:
+                    return amount
+
+    # Fallback: tenta detetar montantes perto de palavras-chave.
+    for kw_match in re.finditer(r"vencido|divida|dívida", lowered):
+        start = max(0, kw_match.start() - 80)
+        end = min(len(page_text), kw_match.end() + 120)
+        window = page_text[start:end]
+        amount_match = re.search(amount_pattern, window, flags=re.IGNORECASE)
+        if amount_match:
+            amount = _coerce_float(amount_match.group(1))
+            if amount is not None:
+                return amount
+
+    # Fallback final: primeiro montante plausível na página.
+    amount_match = re.search(amount_pattern, page_text, flags=re.IGNORECASE)
+    if amount_match:
+        amount = _coerce_float(amount_match.group(1))
+        if amount is not None:
+            return amount
+
     return None
-
-
-def _extract_payment_info(html: str) -> dict:
-    """Extrai informações de pagamento da página de junção de débitos."""
-    if not html:
-        return {}
-    
-    soup = BeautifulSoup(html, "html.parser")
-    info = {}
-    
-    # Extrair Valor Total (na última tabela do formulário, na linha "Valor Total:")
-    valor_total_td = soup.find("td", string=re.compile(r"Valor Total\s*:", re.IGNORECASE))
-    if valor_total_td:
-        valor_total_row = valor_total_td.find_parent("tr")
-        if valor_total_row:
-            valor_cell = valor_total_row.find_all("td")[-1]
-            if valor_cell:
-                valor_text = valor_cell.get_text(strip=True)
-                valor_match = re.search(r"(-?\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})?)", valor_text)
-                if valor_match:
-                    info["valor_total"] = _coerce_float(valor_match.group(1))
-    
-    # Extrair dados da entidade (formulario-legenda)
-    legenda_tds = soup.find_all("td", class_="formulario-legenda")
-    for td in legenda_tds:
-        texto = td.get_text(strip=True)
-        valor_td = td.find_next_sibling("td")
-        if valor_td:
-            valor = valor_td.get_text(strip=True)
-            
-            if "Cliente" in texto:
-                info["cliente"] = valor
-            elif "N.I.F." in texto:
-                info["nif"] = valor
-            elif "Morada" in texto:
-                info["morada"] = valor
-            elif "Código Postal" in texto:
-                info["codigo_postal"] = valor
-            elif "Localidade" in texto:
-                info["localidade"] = valor
-    
-    # Extrair débitos associados
-    debitos = []
-    tabela_debitos = soup.find("table", class_="formulario")
-    if tabela_debitos:
-        rows = tabela_debitos.find_all("tr")
-        for row in rows:
-            cells = row.find_all("td")
-            if len(cells) >= 4:
-                descricao = cells[0].get_text(strip=True) if cells[0] else ""
-                valor = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-                juro = cells[2].get_text(strip=True) if len(cells) > 2 else ""
-                data_limite = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-                
-                if descricao and "Débito Associado" not in descricao and "Valor" not in descricao:
-                    debito = {
-                        "descricao": descricao,
-                        "valor": valor.replace("&nbsp;", " "),
-                        "juro": juro.replace("&nbsp;", " ") if juro else None,
-                        "data_limite": data_limite if data_limite else None
-                    }
-                    debitos.append(debito)
-    
-    if debitos:
-        info["debitos"] = debitos
-    
-    return info
 
 
 # ---------------------------------------------------------------------------
@@ -644,80 +614,22 @@ async def get_my_grades() -> str:
 
 @mcp.tool()
 async def get_my_current_account() -> str:
-    """Obtém informação completa da conta corrente: saldo total e saldo vencido."""
+    """Obtém informação da conta corrente e destaca o saldo vencido."""
     try:
         html = await _make_auth_request_text(CURRENT_ACCOUNT_URL, {"pct_cod": str(_session.codigo)})
-        
-        saldo_total = _find_saldo_total(html)
-        saldo_vencido = _find_saldo_vencido(html)
-        
-        parts = []
-        if saldo_total is not None:
-            parts.append(f"Saldo total: {saldo_total:.2f} EUR")
-        if saldo_vencido is not None:
-            parts.append(f"Saldo vencido: {saldo_vencido:.2f} EUR")
-        
-        if not parts:
-            return "Conta corrente: não foi possível identificar os valores na resposta do SIGARRA."
-        
-        return "Conta corrente:\n" + "\n".join(parts)
+        overdue = _find_overdue_amount_in_text(html)
+        if overdue is None:
+            return (
+                "Conta corrente: não foi possível identificar automaticamente o saldo vencido "
+                "na resposta do SIGARRA."
+            )
+
+        if overdue <= 0:
+            return "Conta corrente: não tens saldo vencido."
+
+        return f"Conta corrente: tens {overdue:.2f} EUR de saldo vencido."
     except Exception as exc:
         return f"Erro ao obter conta corrente: {exc}"
-
-
-@mcp.tool()
-async def get_payment_info() -> str:
-    """Obtém informações de pagamento para o débito mais antigo em atraso."""
-    if not _session.authenticated:
-        return "Precisas de estar autenticado para obter informações de pagamento."
-    
-    try:
-        # 1. Obter a página da conta corrente
-        html = await _make_auth_request_text(CURRENT_ACCOUNT_URL, {"pct_cod": str(_session.codigo)})
-        
-        # 2. Encontrar o primeiro link de pagamento
-        payment_link = _find_first_payment_link(html)
-        if not payment_link:
-            return "Não foram encontrados débitos pendentes para pagamento."
-        
-        # 3. Seguir o link para a página de pagamento
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, cookies=_session.cookies) as client:
-            response = await client.get(payment_link, headers=HEADERS)
-            response.raise_for_status()
-            payment_html = response.text
-        
-        # 4. Extrair informações de pagamento
-        payment_info = _extract_payment_info(payment_html)
-        
-        if not payment_info:
-            return "Não foi possível extrair as informações de pagamento."
-        
-        # 5. Formatar resposta
-        lines = ["📋 Informações de Pagamento:"]
-        
-        if "cliente" in payment_info:
-            lines.append(f"Cliente: {payment_info['cliente']}")
-        if "nif" in payment_info:
-            lines.append(f"NIF: {payment_info['nif']}")
-        if "valor_total" in payment_info:
-            lines.append(f"Valor Total a Pagar: {payment_info['valor_total']:.2f} EUR")
-        
-        if "debitos" in payment_info:
-            lines.append("\nDébitos associados:")
-            for debito in payment_info["debitos"]:
-                linha = f"  • {debito['descricao']}: {debito['valor']}"
-                if debito.get("juro"):
-                    linha += f" (Juro: {debito['juro']})"
-                if debito.get("data_limite"):
-                    linha += f" - Data Limite: {debito['data_limite']}"
-                lines.append(linha)
-        
-        lines.append(f"\n🔗 Link para pagamento: {payment_link}")
-        
-        return "\n".join(lines)
-        
-    except Exception as exc:
-        return f"Erro ao obter informações de pagamento: {exc}"
 
 
 if __name__ == "__main__":
