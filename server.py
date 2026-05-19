@@ -24,6 +24,7 @@ TEACHER_PROFILE_URL = f"{BASE_URL}/mob_func_geral.perfil"
 TEACHER_SEARCH_URL = f"{BASE_URL}/mob_func_geral.pesquisa"
 COURSE_INFO_URL = f"{BASE_URL}/mob_ucurr_geral.perfil"
 COURSE_SEARCH_URL = f"{BASE_URL}/ucurr_geral.pesquisa_ocorr_ucs_list"
+COURSE_SCHEDULE_MOBILE_URL = f"{BASE_URL}/mob_hor_geral.ucurr"
 PARKING_URL = f"{BASE_URL}/instalacs_geral.ocupacao_parques"
 CANTEEN_URL = f"{BASE_URL}/mob_eme_geral.cantinas"
 
@@ -194,6 +195,88 @@ def _coerce_float(value) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _format_time_minutes(raw_value) -> str:
+    if raw_value is None:
+        return "?"
+    if isinstance(raw_value, str):
+        return raw_value.strip() or "?"
+    if isinstance(raw_value, (int, float)):
+        total = int(raw_value)
+        if total >= 24 * 3600:
+            total //= 60
+        if total >= 24 * 60:
+            total //= 60
+        if total < 0:
+            return "?"
+        h, m = divmod(total, 60)
+        return f"{h:02d}:{m:02d}"
+    return "?"
+
+
+def _format_course_schedule_mobile(payload) -> str:
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        entries = payload.get("horario") or payload.get("aulas") or payload.get("resposta") or []
+    else:
+        entries = []
+
+    if not isinstance(entries, list) or not entries:
+        return ""
+
+    days_pt = {
+        0: "Domingo",
+        1: "Segunda",
+        2: "Terça",
+        3: "Quarta",
+        4: "Quinta",
+        5: "Sexta",
+        6: "Sábado",
+        7: "Domingo",
+    }
+
+    lines = ["Horário da UC:"]
+    for aula in entries[:250]:
+        if not isinstance(aula, dict):
+            continue
+
+        day_raw = aula.get("dia")
+        day_label = (
+            aula.get("dia_descr")
+            or aula.get("dia_semana")
+            or days_pt.get(day_raw, f"Dia {day_raw}")
+            if day_raw is not None
+            else "Dia ?"
+        )
+
+        start = _format_time_minutes(aula.get("hora_inicio"))
+        end = _format_time_minutes(aula.get("hora_fim"))
+
+        if end == "?" and aula.get("aula_duracao") and start != "?":
+            try:
+                start_h, start_m = [int(p) for p in start.split(":")]
+                total_min = start_h * 60 + start_m + int(aula.get("aula_duracao", 0) * 60)
+                end = f"{(total_min // 60) % 24:02d}:{total_min % 60:02d}"
+            except ValueError:
+                end = "?"
+
+        tipo = aula.get("tipo") or aula.get("tipo_descr") or "?"
+        turma = aula.get("turma_sigla") or aula.get("sigla_turma") or aula.get("turma") or "?"
+        sala = aula.get("sala_sigla") or aula.get("sala") or "?"
+        uc = aula.get("ucurr_sigla") or aula.get("ucurr_nome") or aula.get("ocorr_nome") or "UC"
+
+        lines.append(f"- {day_label} | {start}-{end} | {uc} ({tipo}) | Turma: {turma} | Sala: {sala}")
+
+    return "\n".join(lines)
+
+
+def _week_range_strings(weeks_ahead: int = 16) -> tuple[str, str]:
+    today = datetime.now()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6 + weeks_ahead * 7)
+    return week_start.strftime("%Y%m%d"), week_end.strftime("%Y%m%d")
 
 
 def _find_overdue_amount(payload) -> float | None:
@@ -452,6 +535,49 @@ async def get_course_info(ocorrencia_id: int) -> str:
         return f"Erro ao obter UC {ocorrencia_id}: {exc}"
 
 
+@mcp.tool()
+async def get_course_schedule_mobile(
+    ocorrencia_id: int,
+    semana_ini: str | None = None,
+    semana_fim: str | None = None,
+) -> str:
+    """Obtém horário de uma UC via endpoint móvel (requer login)."""
+    try:
+        if not _session.authenticated:
+            return "Não está autenticado. Use a ferramenta 'login' primeiro."
+        if not _is_session_valid():
+            return "Sessão expirada. Por favor, faça login novamente."
+        if not semana_ini or not semana_fim:
+            semana_ini, semana_fim = _week_range_strings()
+
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=True,
+            cookies=_session.cookies,
+        ) as client:
+            response = await client.get(
+                COURSE_SCHEDULE_MOBILE_URL,
+                params={
+                    "pv_ocorrencia_id": ocorrencia_id,
+                    "pv_semana_ini": semana_ini,
+                    "pv_semana_fim": semana_fim,
+                },
+                headers=HEADERS,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        formatted = _format_course_schedule_mobile(data)
+        if not formatted:
+            return (
+                "Não foi possível obter horários nesta janela temporal. "
+                "Tenta outro intervalo de semanas ou confirma se estás inscrito na UC."
+            )
+        return formatted
+    except Exception as exc:
+        return f"Erro ao obter horário da UC {ocorrencia_id}: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Ferramentas de Autenticação
 # ---------------------------------------------------------------------------
@@ -556,7 +682,16 @@ async def get_my_exams() -> str:
         
         lines = ["Exames Inscritos:"]
         for exam in exames:
-            lines.append(f"• {exam.get('ucurr_sigla', '?')} - {exam.get('data', '?')} às {exam.get('hora', '?')} (Sala: {exam.get('sala', '?')})")
+            uc_nome = exam.get('ocorr_nome', '?')
+            data_exam = exam.get('data', '?')
+            hora_inicio = exam.get('hora_inicio', '?')
+            hora_fim = exam.get('hora_fim', '?')
+            salas = exam.get('salas', [])
+            sala_siglas = ', '.join(s.get('espaco_sigla', '?') for s in salas) if salas else 'Por atribuir'
+            
+            lines.append(f"• {uc_nome}")
+            lines.append(f"  Data: {data_exam} | Hora: {hora_inicio}-{hora_fim}")
+            lines.append(f"  Sala(s): {sala_siglas}")
         return "\n".join(lines)
     except Exception as exc:
         return str(exc)

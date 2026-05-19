@@ -10,6 +10,7 @@ import re
 import sys
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
@@ -58,6 +59,7 @@ DEFAULT_SOURCE_URL = "https://sigarra.up.pt/feup/pt/web_page.inicial"
 SOURCE_URLS = {
     "teacher": "https://sigarra.up.pt/feup/pt/mob_func_geral.pesquisa",
     "course": "https://sigarra.up.pt/feup/pt/ucurr_geral.pesquisa_ocorr_ucs_list",
+    "course_schedule_mobile": "https://sigarra.up.pt/feup/pt/mob_hor_geral.ucurr",
     "calendar": "https://sigarra.up.pt/feup/pt/web_base.gera_pagina?p_pagina=calend%c3%a1rio%20escolar",
     "canteen": "https://sigarra.up.pt/feup/pt/mob_eme_geral.cantinas",
     "parking": "https://sigarra.up.pt/feup/pt/instalacs_geral.ocupacao_parques",
@@ -71,6 +73,7 @@ SOURCE_URLS = {
 COURSE_INFO_VIEW_URL = "https://sigarra.up.pt/feup/pt/ucurr_geral.ficha_uc_view"
 SOURCE_URLS_BY_CONTEXT = {
     "horário": SOURCE_URLS["schedule"],
+    "horário da uc": SOURCE_URLS["course_schedule_mobile"],
     "exames": SOURCE_URLS["exams"],
     "perfil": SOURCE_URLS["profile"],
     "notas": SOURCE_URLS["grades"],
@@ -146,6 +149,13 @@ def _append_query_params(url: str, params: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 
+def _week_range_strings(weeks_ahead: int = 16) -> tuple[str, str]:
+    today = datetime.now()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6 + weeks_ahead * 7)
+    return week_start.strftime("%Y%m%d"), week_end.strftime("%Y%m%d")
+
+
 def _detect_response_language(question: str) -> str:
     """Deteta rapidamente se a pergunta foi escrita em ingles ou portugues."""
     q = question.lower().strip()
@@ -197,6 +207,7 @@ def _choose_source_url(intents: dict, context_type: str | None, student_code: st
     """Escolhe uma única URL de confirmação com prioridade por intenção."""
     priority = [
         "teacher",
+        "course_schedule_mobile",
         "course",
         "schedule",
         "exams",
@@ -267,6 +278,7 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
     global _conversation_context
     global _last_ask_meta
     current_account_summary = ""
+    direct_answer = None
     tools_called_ordered = []
 
     async def call_mcp_tool(tool_name: str, arguments: dict):
@@ -313,6 +325,23 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
             ]
         ),
     }
+    intents["course_schedule_mobile"] = any(
+        phrase in question_lower
+        for phrase in [
+            "horário da uc",
+            "horario da uc",
+            "horário da disciplina",
+            "horario da disciplina",
+            "horário da cadeira",
+            "horario da cadeira",
+            "horário da unidade curricular",
+            "horario da unidade curricular",
+        ]
+    ) or (
+        any(marker in question_lower for marker in ["horário", "horario"])
+        and any(marker in question_lower for marker in ["uc", "unidade curricular", "disciplina", "cadeira"])
+    )
+    intents["schedule"] = intents["schedule"] and not intents["course_schedule_mobile"]
     has_new_intent = any(intents.values())
     intents["follow_up"] = _is_follow_up_question(question_lower, has_new_intent) and _conversation_context["type"]
     source_url_override = None
@@ -410,7 +439,52 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
                 context_parts.append(f"\nPerfil {i+1}:\n{prof_res.content[0].text if prof_res.content else ''}")
         if verbose: print("OK")
 
-    if intents["course"]:
+    if intents["course_schedule_mobile"]:
+        if verbose: print("  [MCP] A obter horário da UC (móvel)...", end=" ", flush=True)
+        course_match = re.search(
+            r'(?:uc|unidade curricular|disciplina|cadeira|programa)(?:\s+de|\s+da|\s+do)?\s+([a-zà-ú0-9\-]+(?:\s+[a-zà-ú0-9\-]+)*)',
+            question_lower,
+        )
+        uc_query = course_match.group(1).strip(" .?!") if course_match else question.strip()
+
+        search_res = await call_mcp_tool("search_courses", {"query": uc_query})
+        search_data = search_res.content[0].text if search_res.content else ""
+        context_parts.append(f"\nResultados da pesquisa de UCs:\n{search_data}")
+        _conversation_context = {"type": "horário da uc", "data": search_data}
+
+        found_ids = re.findall(r'ocorrencia_id:\s*(\d+)', search_data)
+        if found_ids:
+            selected_id = found_ids[0]
+            semana_ini, semana_fim = _week_range_strings()
+            schedule_res = await call_mcp_tool(
+                "get_course_schedule_mobile",
+                {
+                    "ocorrencia_id": int(selected_id),
+                    "semana_ini": semana_ini,
+                    "semana_fim": semana_fim,
+                },
+            )
+            schedule_data = schedule_res.content[0].text if schedule_res.content else ""
+            context_parts.append(f"\nHorário da UC encontrada:\n{schedule_data}")
+            _conversation_context = {"type": "horário da uc", "data": schedule_data}
+            if schedule_data:
+                direct_answer = schedule_data
+            source_url_override = _append_query_params(
+                SOURCE_URLS["course_schedule_mobile"],
+                {
+                    "pv_ocorrencia_id": selected_id,
+                    "pv_semana_ini": semana_ini,
+                    "pv_semana_fim": semana_fim,
+                },
+            )
+            if len(found_ids) > 1:
+                context_parts.append("\nNota: Foram encontradas várias UCs; o horário acima refere-se ao primeiro resultado.")
+        else:
+            source_url_override = SOURCE_URLS["course_schedule_mobile"]
+
+        if verbose: print("OK")
+
+    if intents["course"] and not intents["course_schedule_mobile"]:
         if verbose: print("  [MCP] A pesquisar UC...", end=" ", flush=True)
         course_match = re.search(
             r'(?:uc|unidade curricular|disciplina|cadeira|programa)(?:\s+de|\s+da|\s+do)?\s+([a-zà-ú0-9\-]+(?:\s+[a-zà-ú0-9\-]+)*)',
@@ -466,6 +540,17 @@ async def ask(question: str, session: ClientSession, is_authenticated: bool = Fa
     source_url = _choose_source_url(intents, _conversation_context["type"], student_code)
     if source_url_override:
         source_url = source_url_override
+
+    if intents.get("course_schedule_mobile") and direct_answer:
+        answer_with_source = f"{direct_answer}\n\nFonte: {source_url}"
+        _last_ask_meta = {
+            "tools_used": list(OrderedDict.fromkeys(tools_called_ordered).keys()),
+            "mcp_calls": len(tools_called_ordered),
+        }
+        if verbose:
+            print(f"Resposta: {direct_answer}")
+            print(f"\nFonte: {source_url}")
+        return answer_with_source
 
     # 5. Comunicação com a API (LLM)
     response_language = _detect_response_language(question)
