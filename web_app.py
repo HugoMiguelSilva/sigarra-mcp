@@ -168,8 +168,11 @@ def _utc_now() -> str:
 
 
 def _is_status_authenticated(status_text: str) -> bool:
-    status_lower = status_text.lower()
-    return "sessão activa" in status_lower or "sessao activa" in status_lower
+    status_lower = status_text.lower().strip()
+    return (
+        status_lower.startswith("sessão activa:")
+        or status_lower.startswith("sessao activa:")
+    )
 
 
 def _extract_account_scope(status_text: str, fallback_login: str | None = None) -> str:
