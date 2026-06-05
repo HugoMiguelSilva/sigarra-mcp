@@ -9,6 +9,7 @@ const sendBtn = document.getElementById("send-btn");
 const sessionStatusEl = document.getElementById("session-status");
 const conversationListEl = document.getElementById("conversation-list");
 const loginErrorEl = document.getElementById("login-error");
+const oidcLoginBtn = document.getElementById("oidc-login-btn");
 
 let currentConversationId = null;
 
@@ -354,6 +355,13 @@ newChatBtn.addEventListener("click", () => {
     appendMessage("assistant", "Erro ao criar nova conversa.");
   });
 });
+
+if (oidcLoginBtn) {
+  oidcLoginBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    window.location.href = "/login/oidc";
+  });
+}
 
 async function bootstrap() {
   await refreshSessionStatus();

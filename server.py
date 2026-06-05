@@ -4,6 +4,7 @@
 MCP Server para consulta de informações da FEUP no SIGARRA.
 """
 
+import base64
 import re
 import time
 import unicodedata
@@ -27,6 +28,7 @@ COURSE_SEARCH_URL = f"{BASE_URL}/ucurr_geral.pesquisa_ocorr_ucs_list"
 COURSE_SCHEDULE_MOBILE_URL = f"{BASE_URL}/mob_hor_geral.ucurr"
 PARKING_URL = f"{BASE_URL}/instalacs_geral.ocupacao_parques"
 CANTEEN_URL = f"{BASE_URL}/mob_eme_geral.cantinas"
+OIDC_TOKEN_URL = "https://sigarra.up.pt/auth/oidc/token"
 
 # URLs de autenticação e endpoints autenticados (API móvel JSON)
 LOGIN_URL = f"{BASE_URL}/mob_val_geral.autentica"
@@ -617,6 +619,61 @@ async def login(username: str, password: str) -> str:
     except Exception as exc:
         _session = SigarraSession(authenticated=False, error_msg="Falha na autenticação")
         return "Erro ao autenticar: falha na conexão ou credenciais inválidas."
+
+
+@mcp.tool()
+async def login_oidc(access_token: str, codigo: str) -> str:
+    """Autentica no SIGARRA usando um access token OIDC federado."""
+    global _session
+
+    access_token = (access_token or "").strip()
+    codigo = (codigo or "").strip()
+    if not access_token:
+        return "Token OIDC em falta."
+    if not codigo:
+        return "Código pessoal em falta."
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            response = await client.get(
+                OIDC_TOKEN_URL,
+                headers={
+                    **HEADERS,
+                    "Authorization": f"Bearer {access_token}",
+                },
+            )
+            response.raise_for_status()
+
+            cookies = dict(client.cookies)
+            if not cookies:
+                _session = SigarraSession(authenticated=False, error_msg="Falha na autenticação federada")
+                return "Autenticação federada falhada."
+
+            nome = codigo
+            try:
+                prof_res = await client.get(
+                    STUDENT_PROFILE_URL,
+                    params={"pv_codigo": codigo},
+                    headers=HEADERS,
+                )
+                if prof_res.status_code == 200:
+                    nome = prof_res.json().get("nome", codigo)
+            except Exception:
+                pass
+
+            _session = SigarraSession(
+                authenticated=True,
+                codigo=int(codigo) if codigo.isdigit() else None,
+                nome=nome,
+                tipo="A",
+                login=f"up{codigo}",
+                cookies=cookies,
+                login_time=time.time(),
+            )
+            return f"Login federado bem-sucedido! Bem-vindo(a), {_session.nome}."
+    except Exception as exc:
+        _session = SigarraSession(authenticated=False, error_msg="Falha na autenticação federada")
+        return f"Erro ao autenticar federado: falha na conexão ou token inválido. {exc}"
 
 
 @mcp.tool()

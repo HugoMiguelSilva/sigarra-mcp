@@ -3,16 +3,23 @@
 Cliente MCP para perguntas em linguagem natural sobre o SIGARRA.
 """
 
+import base64
 import asyncio
+import hashlib
 import json
 import os
 import re
+import secrets
 import sys
+import threading
+import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import webbrowser
 
 if os.name == 'nt':
     import msvcrt
@@ -54,6 +61,28 @@ API_ENDPOINT = os.getenv("API_ENDPOINT", "https://api.iaedu.pt/agent-chat/api/v1
 API_KEY = os.getenv("API_KEY", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 SERVER_SCRIPT = Path(__file__).parent / "server.py"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+OIDC_DISCOVERY_URL = os.getenv(
+    "OIDC_DISCOVERY_URL",
+    "https://open-id.up.pt/realms/sigarra/.well-known/openid-configuration",
+).strip()
+OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "").strip()
+OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET", "").strip()
+OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI", "http://127.0.0.1:8765/callback").strip()
+OIDC_SCOPE = os.getenv("OIDC_SCOPE", "openid profile email").strip()
+OIDC_IDP_HINT = os.getenv("OIDC_IDP_HINT", "saml").strip()
+OIDC_TIMEOUT_SECONDS = _env_int("OIDC_TIMEOUT_SECONDS", 300)
 
 DEFAULT_SOURCE_URL = "https://sigarra.up.pt/feup/pt/web_page.inicial"
 SOURCE_URLS = {
@@ -184,6 +213,310 @@ def _detect_response_language(question: str) -> str:
         pt_score += 2
 
     return "en" if en_score > pt_score else "pt"
+
+
+def _oidc_enabled() -> bool:
+    return bool(OIDC_CLIENT_ID)
+
+
+async def _fetch_oidc_metadata() -> dict:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        response = await client.get(OIDC_DISCOVERY_URL, headers=HEADERS)
+        response.raise_for_status()
+        metadata = response.json()
+
+    if not isinstance(metadata, dict):
+        raise ValueError("Discovery OIDC inválido.")
+    return metadata
+
+
+def _build_pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _extract_oidc_username(id_token: str) -> str:
+    if not id_token:
+        return ""
+
+    try:
+        parts = id_token.split(".")
+        if len(parts) < 2:
+            return ""
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        username = str(claims.get("preferred_username") or claims.get("sub") or "").strip()
+    except Exception:
+        return ""
+
+    if "@" in username:
+        username = username.split("@", 1)[0]
+    if username.lower().startswith("up"):
+        username = username[2:]
+    return username.strip()
+
+
+def _parse_oidc_callback_response(raw_response: str) -> dict[str, str]:
+    raw_response = (raw_response or "").strip()
+    if not raw_response:
+        return {}
+
+    if raw_response.startswith(("http://", "https://")):
+        parsed = urlparse(raw_response)
+        data = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if parsed.fragment:
+            data.update(dict(parse_qsl(parsed.fragment, keep_blank_values=True)))
+        return data
+
+    if "=" in raw_response and "&" in raw_response:
+        return dict(parse_qsl(raw_response, keep_blank_values=True))
+
+    return {"code": raw_response}
+
+
+def _is_local_redirect_uri(redirect_uri: str) -> bool:
+    parsed = urlparse(redirect_uri or "")
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def _wait_for_oidc_callback(redirect_uri: str, auth_url: str, expected_state: str) -> dict[str, str]:
+    parsed_redirect = urlparse(redirect_uri)
+    host = parsed_redirect.hostname or "127.0.0.1"
+    port = parsed_redirect.port or (443 if parsed_redirect.scheme == "https" else 80)
+    expected_path = parsed_redirect.path or "/"
+    callback_event = threading.Event()
+    callback_data: dict[str, str] = {}
+
+    class OIDCCallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed_request = urlparse(self.path)
+            if parsed_request.path != expected_path:
+                self.send_error(404, "Not Found")
+                return
+
+            params = dict(parse_qsl(parsed_request.query, keep_blank_values=True))
+            callback_data.clear()
+            callback_data.update(params)
+
+            if params.get("state") and params.get("state") != expected_state:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    "<html><body><h3>Estado OIDC inválido.</h3>"
+                    "<p>Podes fechar esta janela e voltar ao terminal.</p></body></html>".encode("utf-8")
+                )
+                callback_event.set()
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(
+                "<html><body><h3>Autenticação concluída.</h3>"
+                "<p>Podes regressar ao terminal.</p></body></html>".encode("utf-8")
+            )
+            callback_event.set()
+
+        def log_message(self, format, *args):  # noqa: A003
+            return
+
+    try:
+        server = HTTPServer((host, port), OIDCCallbackHandler)
+    except OSError as exc:
+        raise RuntimeError(f"Não foi possível abrir o callback local em {host}:{port}: {exc}") from exc
+
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        print("Abre o navegador para concluir a autenticação federada:")
+        print(auth_url)
+        try:
+            webbrowser.open(auth_url, new=1, autoraise=True)
+        except Exception:
+            pass
+
+        if not callback_event.wait(OIDC_TIMEOUT_SECONDS):
+            raise TimeoutError("Tempo esgotado à espera do retorno OIDC.")
+        return callback_data
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+async def _exchange_oidc_code(token_endpoint: str, code: str, code_verifier: str) -> dict:
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": OIDC_CLIENT_ID,
+        "code": code,
+        "redirect_uri": OIDC_REDIRECT_URI,
+        "code_verifier": code_verifier,
+    }
+    if OIDC_CLIENT_SECRET:
+        data["client_secret"] = OIDC_CLIENT_SECRET
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        response = await client.post(
+            token_endpoint,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Falha ao trocar o code por token: {response.text.strip() or response.status_code}")
+        payload = response.json()
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Resposta OIDC inválida no token endpoint.")
+    return payload
+
+
+async def _resolve_oidc_username(metadata: dict, access_token: str, id_token: str) -> str:
+    username = _extract_oidc_username(id_token)
+    if username:
+        return username
+
+    userinfo_endpoint = str(metadata.get("userinfo_endpoint", "")).strip()
+    if not userinfo_endpoint:
+        return ""
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            response = await client.get(
+                userinfo_endpoint,
+                headers={**HEADERS, "Authorization": f"Bearer {access_token}"},
+            )
+            if response.status_code >= 400:
+                return ""
+            payload = response.json()
+    except Exception:
+        return ""
+
+    if not isinstance(payload, dict):
+        return ""
+
+    username = str(payload.get("preferred_username") or payload.get("sub") or "").strip()
+    if "@" in username:
+        username = username.split("@", 1)[0]
+    if username.lower().startswith("up"):
+        username = username[2:]
+    return username.strip()
+
+
+async def _login_oidc(session: ClientSession, verbose: bool = True) -> bool:
+    if not _oidc_enabled():
+        if verbose:
+            print("Autenticação federada indisponível: falta OIDC_CLIENT_ID.")
+        return False
+
+    try:
+        metadata = await _fetch_oidc_metadata()
+        auth_endpoint = str(metadata.get("authorization_endpoint", "")).strip()
+        token_endpoint = str(metadata.get("token_endpoint", "")).strip()
+        if not auth_endpoint or not token_endpoint:
+            raise RuntimeError("Discovery OIDC sem authorization_endpoint/token_endpoint.")
+
+        code_verifier, code_challenge = _build_pkce_pair()
+        state = secrets.token_urlsafe(24)
+        auth_params = {
+            "client_id": OIDC_CLIENT_ID,
+            "redirect_uri": OIDC_REDIRECT_URI,
+            "response_type": "code",
+            "scope": OIDC_SCOPE,
+            "state": state,
+            "response_mode": "query",
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        if OIDC_IDP_HINT:
+            auth_params["kc_idp_hint"] = OIDC_IDP_HINT
+
+        auth_url = f"{auth_endpoint}?{urlencode(auth_params)}"
+
+        if _is_local_redirect_uri(OIDC_REDIRECT_URI):
+            try:
+                callback_data = await asyncio.to_thread(_wait_for_oidc_callback, OIDC_REDIRECT_URI, auth_url, state)
+            except Exception as exc:
+                if verbose:
+                    print(f"Não foi possível usar o callback local: {exc}")
+                callback_data = {}
+
+        if not callback_data:
+            print("Abre o navegador para concluir a autenticação federada:")
+            print(auth_url)
+            try:
+                webbrowser.open(auth_url, new=1, autoraise=True)
+            except Exception:
+                pass
+            raw_callback = input("Depois cola a URL completa de retorno (ou apenas o code): ").strip()
+            callback_data = _parse_oidc_callback_response(raw_callback)
+
+        if callback_data.get("error"):
+            error_description = callback_data.get("error_description") or callback_data.get("error")
+            raise RuntimeError(f"OIDC rejeitado: {error_description}")
+
+        code = callback_data.get("code", "").strip()
+        returned_state = callback_data.get("state", "").strip()
+        if not code:
+            raise RuntimeError("Resposta OIDC sem code.")
+        if returned_state and returned_state != state:
+            raise RuntimeError("State OIDC inválido.")
+
+        token_data = await _exchange_oidc_code(token_endpoint, code, code_verifier)
+        access_token = str(token_data.get("access_token", "")).strip()
+        id_token = str(token_data.get("id_token", "")).strip()
+        if not access_token:
+            raise RuntimeError("Token OIDC sem access_token.")
+
+        codigo = await _resolve_oidc_username(metadata, access_token, id_token)
+        if not codigo:
+            raise RuntimeError("Token OIDC sem username utilizável.")
+
+        result = await session.call_tool("login_oidc", arguments={"access_token": access_token, "codigo": codigo})
+        response = result.content[0].text if result.content else ""
+        if verbose:
+            print(response)
+        return "bem-sucedido" in response.lower()
+    except Exception as exc:
+        if verbose:
+            print(f"Erro ao autenticar federado: {exc}")
+        return False
+
+
+def _question_needs_auth(question: str) -> bool:
+    q = question.lower()
+    patterns = [
+        "horário da uc",
+        "horario da uc",
+        "horário da disciplina",
+        "horario da disciplina",
+        "horário da cadeira",
+        "horario da cadeira",
+        "horário da unidade curricular",
+        "horario da unidade curricular",
+        "meu horário",
+        "meus exames",
+        "exames inscritos",
+        "meu perfil",
+        "meus dados",
+        "minhas notas",
+        "minhas inscrições",
+        "inscrições",
+        "inscricoes",
+        "conta corrente",
+        "saldo vencido",
+        "saldo em dívida",
+        "saldo em divida",
+        "devo",
+        "quanto devo",
+        "current account",
+        "outstanding balance",
+    ]
+    return any(pattern in q for pattern in patterns)
 
 
 async def _get_student_code(
@@ -620,6 +953,15 @@ def _banner() -> None:
 
 async def do_login(session: ClientSession) -> bool:
     print("\n" + "-" * 40 + "\n  LOGIN SIGARRA\n" + "-" * 40)
+    if _oidc_enabled():
+        choice = input("Entrar com autenticação federada OIDC? [S/n/c=clássico]: ").strip().lower()
+        if choice not in {"c", "classic", "clássico", "classico"}:
+            if await _login_oidc(session):
+                return True
+            fallback = input("Autenticação federada falhou. Queres tentar login SIGARRA clássico? [S/n]: ").strip().lower()
+            if fallback in {"n", "nao", "não", "no"}:
+                return False
+
     username = input("Username (ex: up123456789) [Enter para saltar]: ").strip()
     if not username: return False
     
@@ -666,7 +1008,10 @@ async def single_question_mode(question: str) -> None:
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            await ask(question, session, is_authenticated=False)
+            is_authenticated = False
+            if _question_needs_auth(question):
+                is_authenticated = await _login_oidc(session, verbose=True)
+            await ask(question, session, is_authenticated=is_authenticated)
 
 
 def main() -> None:

@@ -4,20 +4,26 @@ Aplicacao web (UI user-friendly) para o assistente SIGARRA.
 """
 
 import asyncio
+import html
+import base64
 import json
-import sqlite3
 import os
 import re
+import secrets
+import sqlite3
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+import urllib.parse
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from mcp import ClientSession, StdioServerParameters
@@ -71,6 +77,74 @@ state = AppState()
 BROWSER_COOKIE_NAME = "sigarra_ui_id"
 ADMIN_COOKIE_NAME = "admin_session"
 DB_PATH = BASE_DIR / "sigarra_ui.db"
+OIDC_AUTH_ENDPOINT = "https://open-id.up.pt/realms/sigarra/protocol/openid-connect/auth"
+OIDC_TOKEN_ENDPOINT = "https://open-id.up.pt/realms/sigarra/protocol/openid-connect/token"
+
+_OIDC_STATES: dict[str, dict[str, str | float]] = {}
+_OIDC_STATES_LOCK = threading.Lock()
+
+
+def _oidc_config() -> dict[str, str]:
+    return {
+        "client_id": os.environ.get("OIDC_CLIENT_ID", "").strip(),
+        "client_secret": os.environ.get("OIDC_CLIENT_SECRET", "").strip(),
+        "redirect_uri": os.environ.get("OIDC_REDIRECT_URI", "").strip(),
+        "auth_endpoint": OIDC_AUTH_ENDPOINT,
+        "token_endpoint": OIDC_TOKEN_ENDPOINT,
+    }
+
+
+def _oidc_enabled() -> bool:
+    cfg = _oidc_config()
+    return bool(cfg["client_id"] and cfg["client_secret"] and cfg["redirect_uri"])
+
+
+def _extract_oidc_username(id_token: str) -> str:
+    if not id_token:
+        return ""
+
+    try:
+        parts = id_token.split(".")
+        if len(parts) < 2:
+            return ""
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        username = str(claims.get("preferred_username") or claims.get("sub") or "").strip()
+    except Exception:
+        return ""
+
+    if "@" in username:
+        username = username.split("@", 1)[0]
+    if username.lower().startswith("up"):
+        username = username[2:]
+    return username.strip()
+
+
+def _oidc_error_page(title: str, message: str) -> HTMLResponse:
+        page = f"""<!doctype html>
+<html lang="pt">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{html.escape(title)}</title>
+        <style>
+            body {{ font-family: system-ui, sans-serif; margin: 0; padding: 2rem; background: #f4f7fb; color: #1f2937; }}
+            .card {{ max-width: 42rem; margin: 8vh auto 0; background: white; border-radius: 16px; padding: 1.5rem; box-shadow: 0 12px 40px rgba(15, 23, 42, 0.12); }}
+            .muted {{ color: #6b7280; }}
+            a {{ color: #0f766e; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h3>{html.escape(title)}</h3>
+            <p>{html.escape(message)}</p>
+            <p class="muted">Se a autenticação federada falhar, usa o login SIGARRA abaixo.</p>
+            <p><a href="/">Voltar à aplicação</a></p>
+        </div>
+    </body>
+</html>"""
+        return HTMLResponse(page, status_code=200)
 
 
 def _extract_source_link(answer: str) -> tuple[str, str | None]:
@@ -604,6 +678,128 @@ async def index(request: Request) -> HTMLResponse:
     response = HTMLResponse(index_path.read_text(encoding="utf-8"))
     _get_or_create_browser_id(request, response)
     return response
+
+
+@app.get("/login/oidc")
+async def oidc_login_start(request: Request):
+    cfg = _oidc_config()
+    if not _oidc_enabled():
+        return _oidc_error_page(
+            "Autenticação federada indisponível",
+            "Faltam OIDC_CLIENT_ID, OIDC_CLIENT_SECRET ou OIDC_REDIRECT_URI no ambiente.",
+        )
+
+    browser_response = Response(status_code=302)
+    browser_id = _get_or_create_browser_id(request, browser_response)
+    state_token = secrets.token_urlsafe(24)
+    with _OIDC_STATES_LOCK:
+        _OIDC_STATES[state_token] = {
+            "browser_id": browser_id,
+            "expires_at": time.time() + 300,
+        }
+
+    params = urllib.parse.urlencode(
+        {
+            "client_id": cfg["client_id"],
+            "redirect_uri": cfg["redirect_uri"],
+            "response_type": "code",
+            "scope": "openid profile email",
+            "state": state_token,
+            "response_mode": "query",
+            "kc_idp_hint": "saml",
+        }
+    )
+    browser_response.headers["Location"] = f"{cfg['auth_endpoint']}?{params}"
+    browser_response.headers["Cache-Control"] = "no-store"
+    return browser_response
+
+
+@app.get("/login/oidc/callback")
+async def oidc_login_callback(request: Request, response: Response):
+    cfg = _oidc_config()
+    if not _oidc_enabled():
+        return _oidc_error_page(
+            "Autenticação federada indisponível",
+            "Faltam OIDC_CLIENT_ID, OIDC_CLIENT_SECRET ou OIDC_REDIRECT_URI no ambiente.",
+        )
+
+    error = request.query_params.get("error", "").strip()
+    if error:
+        error_description = request.query_params.get("error_description", "").strip()
+        message = error_description or error
+        return _oidc_error_page("Autenticação federada falhou", message)
+
+    state_token = request.query_params.get("state", "").strip()
+    code = request.query_params.get("code", "").strip()
+    if not state_token or not code:
+        return _oidc_error_page("Autenticação federada falhou", "Resposta OIDC incompleta.")
+
+    with _OIDC_STATES_LOCK:
+        state_entry = _OIDC_STATES.pop(state_token, None)
+
+    if not state_entry:
+        return _oidc_error_page("Autenticação federada falhou", "State inválido ou expirado.")
+    if float(state_entry.get("expires_at", 0.0)) < time.time():
+        return _oidc_error_page("Autenticação federada falhou", "State expirado. Tenta novamente.")
+
+    browser_id = str(state_entry.get("browser_id", "")).strip()
+    if not browser_id:
+        return _oidc_error_page("Autenticação federada falhou", "Sessão do browser não encontrada.")
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            token_response = await client.post(
+                cfg["token_endpoint"],
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": cfg["client_id"],
+                    "client_secret": cfg["client_secret"],
+                    "code": code,
+                    "redirect_uri": cfg["redirect_uri"],
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            token_response.raise_for_status()
+            token_data = token_response.json()
+    except Exception as exc:
+        return _oidc_error_page("Autenticação federada falhou", f"Não foi possível trocar o código por token: {exc}")
+
+    access_token = str(token_data.get("access_token", "")).strip()
+    id_token = str(token_data.get("id_token", "")).strip()
+    codigo = _extract_oidc_username(id_token) or str(token_data.get("preferred_username", "")).strip()
+    if codigo.lower().startswith("up"):
+        codigo = codigo[2:]
+    if "@" in codigo:
+        codigo = codigo.split("@", 1)[0]
+    if not access_token or not codigo:
+        return _oidc_error_page("Autenticação federada falhou", "Token OIDC inválido ou sem username utilizável.")
+
+    response_text = ""
+    status_text = ""
+    async with state.mcp_lock:
+        result = await state.session.call_tool(
+            "login_oidc",
+            arguments={"access_token": access_token, "codigo": codigo},
+        )
+        response_text = result.content[0].text if result.content else ""
+        if "bem-sucedido" in response_text.lower():
+            status_result = await state.session.call_tool("get_session_status", arguments={})
+            status_text = status_result.content[0].text if status_result.content else ""
+
+    is_authenticated = "bem-sucedido" in response_text.lower()
+    account_scope = _extract_account_scope(status_text, fallback_login=f"up{codigo}")
+    async with state.db_lock:
+        _db_set_browser_session(browser_id, is_authenticated, account_scope)
+
+    if is_authenticated:
+        redirect_response = RedirectResponse(url=str(request.url_for("index")), status_code=303)
+        _get_or_create_browser_id(request, redirect_response)
+        return redirect_response
+
+    return _oidc_error_page(
+        "Autenticação federada falhou",
+        response_text or "O SIGARRA rejeitou a sessão federada. Usa o login antigo abaixo.",
+    )
 
 
 @app.get("/admin", response_class=HTMLResponse)

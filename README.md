@@ -35,7 +35,12 @@ Criar ficheiro `.env` com:
 ```env
 API_KEY=sk-usr-...
 CHANNEL_ID=cmm2882wh19xwj601blybmzhy
+OIDC_CLIENT_ID=...
+OIDC_CLIENT_SECRET=...
+OIDC_REDIRECT_URI=https://SEU_DOMINIO/login/oidc/callback
 ```
+
+Se a autenticação federada não estiver configurada, a UI continua a oferecer o login SIGARRA antigo como fallback manual.
 
 ## Uso
 
@@ -61,6 +66,7 @@ http://127.0.0.1:8000
 ```
 
 A UI inclui:
+- autenticação federada OIDC como caminho preferencial, com fallback para login SIGARRA;
 - chat em linguagem natural;
 - login/logout SIGARRA;
 - historico de conversas (lista na barra lateral);
