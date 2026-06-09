@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ferramentas e Palavras-chave - SIGARRA Assistant</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+    <style>
+      .tools-page {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 40px 20px 64px;
+      }
+
+      .tools-header {
+        margin-bottom: 32px;
+        text-align: center;
+      }
+
+      .tools-header h1 {
+        margin: 0 0 12px;
+        font-size: 2.2rem;
+      }
+
+      .tools-header p {
+        color: var(--muted);
+        font-size: 1.1rem;
+        max-width: 600px;
+        margin: 0 auto;
+      }
+
+      .category-section {
+        margin-bottom: 40px;
+      }
+
+      .category-section h2 {
+        font-size: 1.4rem;
+        border-bottom: 2px solid var(--border);
+        padding-bottom: 10px;
+        margin-bottom: 20px;
+        color: var(--ink);
+      }
+
+      .tools-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 20px;
+      }
+
+      .tool-card {
+        border: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel-2) 90%, white);
+        border-radius: 14px;
+        padding: 20px;
+        box-shadow: 0 4px 15px rgba(31, 26, 20, 0.03);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .tool-name {
+        font-family: monospace;
+        font-size: 1.05rem;
+        font-weight: bold;
+        color: var(--accent-2);
+        background: #e9f3ff;
+        padding: 4px 8px;
+        border-radius: 6px;
+        display: inline-block;
+        margin-bottom: 12px;
+        word-break: break-all;
+      }
+
+      .tool-description {
+        font-size: 0.95rem;
+        line-height: 1.5;
+        margin: 0 0 16px 0;
+        flex-grow: 1;
+      }
+
+      .tool-keywords-title {
+        font-size: 0.85rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+
+      .keyword-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .keyword-tag {
+        background: #fffef9;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.8rem;
+        padding: 3px 8px;
+        border-radius: 12px;
+      }
+
+      .auth-badge {
+        display: inline-flex;
+        align-items: center;
+        font-size: 0.75rem;
+        background: #ffe5e5;
+        color: #c33;
+        padding: 2px 8px;
+        border-radius: 10px;
+        margin-left: 8px;
+        vertical-align: middle;
+        font-weight: bold;
+      }
+
+      .back-btn-container {
+        margin-top: 40px;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="tools-page">
+      <header class="tools-header">
+        <h1>Ferramentas do Sistema</h1>
+        <p>Consulta as capacidades do assistente e as palavras-chave recomendadas para acionar cada ferramenta.</p>
+      </header>
+
+      <section class="category-section">
+        <h2>Pesquisa Académica</h2>
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div><span class="tool-name">search_courses</span></div>
+            <p class="tool-description">Pesquisa UCs (Unidades Curriculares) através do nome ou sigla.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">uc</span>
+              <span class="keyword-tag">unidade curricular</span>
+              <span class="keyword-tag">disciplina</span>
+              <span class="keyword-tag">cadeira</span>
+              <span class="keyword-tag">programa</span>
+              <span class="keyword-tag">avaliação</span>
+              <span class="keyword-tag">objetivos</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_course_info</span></div>
+            <p class="tool-description">Obtém a ficha detalhada de uma UC específica (usada automaticamente após a pesquisa).</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">(Automático via search_courses)</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_course_schedule_mobile</span></div>
+            <p class="tool-description">Obtém o horário detalhado de uma disciplina/UC específica.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">horário da uc</span>
+              <span class="keyword-tag">horário da disciplina</span>
+              <span class="keyword-tag">horário da cadeira</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">search_teachers</span></div>
+            <p class="tool-description">Pesquisa docentes na FEUP pelo nome.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">professor</span>
+              <span class="keyword-tag">docente</span>
+              <span class="keyword-tag">email</span>
+              <span class="keyword-tag">gabinete</span>
+              <span class="keyword-tag">contacto</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_teacher_profile</span></div>
+            <p class="tool-description">Obtém o perfil detalhado, gabinete e contactos de um docente (usado após a pesquisa).</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">(Automático via search_teachers)</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="category-section">
+        <h2>Área Pessoal <span class="auth-badge">🔒 Requer Login</span></h2>
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div><span class="tool-name">get_my_schedule</span></div>
+            <p class="tool-description">Obtém o teu horário pessoal de aulas para a semana atual.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">horário</span>
+              <span class="keyword-tag">aulas</span>
+              <span class="keyword-tag">meu horário</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_my_exams</span></div>
+            <p class="tool-description">Lista todos os exames em que estás inscrito, datas e salas.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">meus exames</span>
+              <span class="keyword-tag">exames inscritos</span>
+              <span class="keyword-tag">quando tenho exame</span>
+              <span class="keyword-tag">minha prova</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_my_grades</span></div>
+            <p class="tool-description">Consulta as tuas notas do percurso académico.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">minhas notas</span>
+              <span class="keyword-tag">minha nota</span>
+              <span class="keyword-tag">nota</span>
+              <span class="keyword-tag">notas</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_my_current_account</span></div>
+            <p class="tool-description">Verifica o estado da tua conta corrente e propinas em dívida.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">conta corrente</span>
+              <span class="keyword-tag">saldo vencido</span>
+              <span class="keyword-tag">saldo em dívida</span>
+              <span class="keyword-tag">dívida</span>
+              <span class="keyword-tag">quanto devo</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_my_enrollments</span></div>
+            <p class="tool-description">Lista as UCs em que estás atualmente inscrito no ano letivo.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">minhas inscrições</span>
+              <span class="keyword-tag">inscrições</span>
+              <span class="keyword-tag">uc inscritas</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_my_profile</span></div>
+            <p class="tool-description">Consulta os teus dados gerais, curso e média atual.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">meu perfil</span>
+              <span class="keyword-tag">meus dados</span>
+              <span class="keyword-tag">meu curso</span>
+              <span class="keyword-tag">média</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="category-section">
+        <h2>Informação Geral / Campus</h2>
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div><span class="tool-name">get_canteen_menu</span></div>
+            <p class="tool-description">Mostra a ementa atualizada das cantinas da FEUP.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">cantina</span>
+              <span class="keyword-tag">menu</span>
+              <span class="keyword-tag">ementa</span>
+              <span class="keyword-tag">almoço</span>
+              <span class="keyword-tag">jantar</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_parking_status</span></div>
+            <p class="tool-description">Devolve a ocupação atual dos parques de estacionamento (P1, P3, P4).</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">parque</span>
+              <span class="keyword-tag">estacionamento</span>
+              <span class="keyword-tag">lugares</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_academic_calendar</span></div>
+            <p class="tool-description">Consulta os períodos letivos, épocas de exames e feriados.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">calendário</span>
+              <span class="keyword-tag">semestre</span>
+              <span class="keyword-tag">férias</span>
+              <span class="keyword-tag">feriado</span>
+              <span class="keyword-tag">época</span>
+            </div>
+          </div>
+          
+          <div class="tool-card">
+            <div><span class="tool-name">search_calendar_events</span></div>
+            <p class="tool-description">Procura por eventos específicos dentro do calendário académico (ex: início de semestre).</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">(Usado em conjunto com calendários)</span>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div><span class="tool-name">get_current_date</span></div>
+            <p class="tool-description">Informa o assistente da data e hora atual do sistema.</p>
+            <div class="tool-keywords-title">Palavras-chave / Gatilhos:</div>
+            <div class="keyword-tags">
+              <span class="keyword-tag">(Acionado silenciosamente no background)</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="category-section">
+        <h2>Sistema e Sessão</h2>
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div><span class="tool-name">login</span></div>
+            <p class="tool-description">Inicia a autenticação com o SIGARRA usando as tuas credenciais ou OIDC.</p>
+          </div>
+          
+          <div class="tool-card">
+            <div><span class="tool-name">logout</span></div>
+            <p class="tool-description">Termina a sessão ativa no sistema e limpa as credenciais da memória.</p>
+          </div>
+          
+          <div class="tool-card">
+            <div><span class="tool-name">get_session_status</span></div>
+            <p class="tool-description">Verifica se existe um utilizador autenticado no momento.</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="back-btn-container">
+        <a class="ghost-btn" href="/">← Voltar ao Chat</a>
+      </div>
+    </main>
+  </body>
+</html>
